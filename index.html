@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aktienanalyse</title>
+    <meta name="description" content="Werkzeug zur technischen Analyse von Aktien: Kurschart, Indikatoren, Kennzahlen und Signale." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 17l6-6 4 4 8-8' fill='none' stroke='%232f7de1' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8" /></svg>
+        <span>Aktienanalyse</span>
+      </div>
+
+      <form id="search-form" class="search" autocomplete="off">
+        <label class="sr-only" for="symbol-input">Symbol</label>
+        <input id="symbol-input" name="symbol" placeholder="Symbol, z. B. AAPL, MSFT, SAP" required maxlength="20" />
+        <button type="submit" class="btn primary">Analysieren</button>
+      </form>
+
+      <div class="toolbar">
+        <label class="select">
+          <span class="sr-only">Datenquelle</span>
+          <select id="source-select">
+            <option value="demo">Demodaten</option>
+            <option value="twelvedata">Twelve Data (API)</option>
+          </select>
+        </label>
+        <button type="button" class="btn" id="csv-button" title="Kursdaten aus CSV-Datei laden">CSV importieren</button>
+        <input type="file" id="csv-input" accept=".csv,.txt,text/csv" hidden />
+        <button type="button" class="btn icon" id="settings-button" title="Einstellungen" aria-label="Einstellungen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="card watchlist">
+        <div class="card-head">
+          <h2>Watchlist</h2>
+          <button type="button" class="btn small" id="watch-add" disabled>+ Hinzufügen</button>
+        </div>
+        <ul id="watchlist" class="watch-items"></ul>
+        <p class="muted small" id="watch-empty">Noch keine Werte. Analysiere ein Symbol und füge es hinzu.</p>
+      </aside>
+
+      <main class="content">
+        <div id="message" class="message" role="status" hidden></div>
+
+        <section class="card quote" aria-live="polite">
+          <div class="quote-main">
+            <div>
+              <h1 id="quote-symbol">–</h1>
+              <div class="muted" id="quote-meta"></div>
+            </div>
+            <div class="quote-price">
+              <div id="quote-last" class="price">–</div>
+              <div id="quote-change" class="change"></div>
+            </div>
+          </div>
+          <span id="source-badge" class="badge"></span>
+        </section>
+
+        <section class="card chart-card">
+          <div class="chart-controls">
+            <div class="segmented" id="range-buttons" role="group" aria-label="Zeitraum">
+              <button type="button" data-range="63">3M</button>
+              <button type="button" data-range="126">6M</button>
+              <button type="button" data-range="252" class="active">1J</button>
+              <button type="button" data-range="756">3J</button>
+              <button type="button" data-range="max">Max</button>
+            </div>
+            <div class="toggles" id="overlay-toggles">
+              <label><input type="checkbox" data-overlay="sma20" /> <i class="swatch s-sma20"></i>SMA 20</label>
+              <label><input type="checkbox" data-overlay="sma50" checked /> <i class="swatch s-sma50"></i>SMA 50</label>
+              <label><input type="checkbox" data-overlay="sma200" checked /> <i class="swatch s-sma200"></i>SMA 200</label>
+              <label><input type="checkbox" data-overlay="bollinger" /> <i class="swatch s-bb"></i>Bollinger</label>
+              <label><input type="checkbox" data-overlay="volume" checked /> <i class="swatch s-vol"></i>Volumen</label>
+              <label class="select compact">
+                <span class="sr-only">Charttyp</span>
+                <select id="chart-type">
+                  <option value="candles">Kerzen</option>
+                  <option value="line">Linie</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="price-chart" class="chart main"></div>
+          <div class="pane-label">RSI (14)</div>
+          <div id="rsi-chart" class="chart sub"></div>
+          <div class="pane-label">MACD (12, 26, 9)</div>
+          <div id="macd-chart" class="chart sub"></div>
+        </section>
+
+        <div class="grid-2">
+          <section class="card">
+            <h2>Kennzahlen</h2>
+            <dl id="stats" class="stats"></dl>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <h2>Technische Signale</h2>
+              <span id="verdict" class="pill"></span>
+            </div>
+            <ul id="signals" class="signals"></ul>
+          </section>
+        </div>
+
+        <p class="disclaimer muted small">
+          Hinweis: Die Auswertungen sind rein regelbasiert und dienen nur zu Informationszwecken. Sie stellen keine
+          Anlageberatung dar. Demodaten sind simuliert und bilden keine echten Kurse ab.
+        </p>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>Einstellungen</h2>
+        <label class="field">
+          <span>Twelve Data API-Key</span>
+          <input id="api-key-input" type="password" autocomplete="off" placeholder="Eigenen API-Key einfügen" />
+        </label>
+        <p class="muted small">
+          Für echte Kursdaten wird ein kostenloser Key von
+          <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener">twelvedata.com</a> benötigt.
+          Der Key wird nur lokal in deinem Browser gespeichert.
+        </p>
+        <div class="dialog-actions">
+          <button value="cancel" class="btn">Abbrechen</button>
+          <button value="save" class="btn primary">Speichern</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

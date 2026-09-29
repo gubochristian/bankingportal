@@ -2,6 +2,8 @@
 // Alle Loader liefern Bars aufsteigend sortiert:
 // { time: 'YYYY-MM-DD', open, high, low, close, volume }
 
+import { lookupSecurity } from './securities.js';
+
 // ---------- Demodaten ----------
 
 function hashString(s) {
@@ -23,15 +25,39 @@ function toIsoDate(d) {
   return d.toISOString().slice(0, 10);
 }
 
-// Deterministischer Random Walk (geometrische Brownsche Bewegung mit wechselnden
-// Trendphasen). Gleiches Symbol ergibt immer dieselbe Kurve.
-export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date() } = {}) {
-  const rand = mulberry32(hashString(symbol.toUpperCase()));
-  const gauss = () => {
-    const u = 1 - rand();
-    const v = rand();
-    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-  };
+// Normalverteilte Zufallszahl, deterministisch aus einem Schlüssel (z. B. „MARKET|2025-01-02“).
+// So erhalten alle Symbole am selben Tag denselben Markt- bzw. Sektorfaktor.
+function gaussFor(key) {
+  const rand = mulberry32(hashString(key));
+  const u = 1 - rand();
+  const v = rand();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+const MARKET_VOL = 0.011;
+const SECTOR_VOL = 0.008;
+
+// Tägliche Marktrendite inkl. wechselnder Trendphasen (ca. 3 Monate je Phase)
+function marketReturn(date) {
+  const phase = Math.floor(Date.parse(date) / (864e5 * 91));
+  const drift = (mulberry32(hashString(`MARKET|phase|${phase}`))() - 0.4) * 0.0022;
+  return drift + gaussFor(`MARKET|${date}`) * MARKET_VOL;
+}
+
+// Simulierte Kurse nach einem einfachen Faktormodell:
+//   Rendite = Beta × Markt + Sektorfaktor + titelspezifisches Rauschen
+// Dadurch sind Aktien untereinander realistisch korreliert (stärker innerhalb
+// eines Sektors), und Anleihen/Gold verhalten sich anders als Aktien.
+// Gleiches Symbol ergibt immer dieselbe Kurve.
+export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date(), profile } = {}) {
+  const sym = symbol.toUpperCase();
+  const known = lookupSecurity(sym);
+  const rand = mulberry32(hashString(sym));
+  const p = profile ?? known?.profile ?? {};
+  const beta = p.beta ?? 0.6 + rand() * 0.9;
+  const idio = p.idio ?? 0.007 + rand() * 0.008;
+  const sector = p.etf ? null : known?.sector ?? `Sektor ${hashString(sym) % 6}`;
+  const alpha = (rand() - 0.5) * 0.0008;
 
   const dates = [];
   const d = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()));
@@ -41,20 +67,20 @@ export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date() 
     d.setUTCDate(d.getUTCDate() - 1);
   }
 
-  const vol = 0.012 + rand() * 0.018; // tägliche Volatilität 1,2–3 %
-  let drift = 0;
   let price = 20 + rand() * 280;
   const baseVolume = 1e6 * (1 + rand() * 20);
   const bars = [];
 
-  for (let i = 0; i < dates.length; i++) {
-    if (i % 60 === 0) drift = (rand() - 0.45) * 0.003; // neue Trendphase
-    const open = price * (1 + gauss() * vol * 0.3);
-    const close = open * Math.exp(drift + gauss() * vol);
-    const high = Math.max(open, close) * (1 + Math.abs(gauss()) * vol * 0.5);
-    const low = Math.min(open, close) * (1 - Math.abs(gauss()) * vol * 0.5);
-    const volume = Math.round(baseVolume * (0.6 + rand() * 0.8) * (1 + Math.abs(close - open) / open * 20));
-    bars.push({ time: dates[i], open: round(open), high: round(high), low: round(low), close: round(close), volume });
+  for (const date of dates) {
+    const sectorMove = sector ? gaussFor(`SECTOR|${sector}|${date}`) * SECTOR_VOL : 0;
+    const ret = alpha + beta * marketReturn(date) + sectorMove + gaussFor(`${sym}|${date}`) * idio;
+    const dayVol = Math.abs(beta) * MARKET_VOL + idio;
+    const open = price * (1 + gaussFor(`${sym}|open|${date}`) * dayVol * 0.25);
+    const close = price * Math.exp(ret);
+    const high = Math.max(open, close) * (1 + Math.abs(gaussFor(`${sym}|high|${date}`)) * dayVol * 0.4);
+    const low = Math.min(open, close) * (1 - Math.abs(gaussFor(`${sym}|low|${date}`)) * dayVol * 0.4);
+    const volume = Math.round(baseVolume * (0.6 + rand() * 0.8) * (1 + (Math.abs(close - open) / open) * 20));
+    bars.push({ time: date, open: round(open), high: round(high), low: round(low), close: round(close), volume });
     price = close;
   }
   return bars;

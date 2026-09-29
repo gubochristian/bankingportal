@@ -1,56 +1,10 @@
 import { createChart, CrosshairMode, LineStyle } from './vendor/lightweight-charts.mjs';
 import { sma, rsi, macd, bollinger } from './indicators.js';
 import { computeStats, computeSignals } from './analysis.js';
-import { generateDemoBars, fetchTwelveData, parseCsv } from './data.js';
-
-// ---------- Hilfsfunktionen ----------
-
-const $ = (sel) => document.querySelector(sel);
-
-const storage = {
-  get(key, fallback) {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw === null ? fallback : JSON.parse(raw);
-    } catch {
-      return fallback;
-    }
-  },
-  set(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      // Speicher nicht verfügbar (z. B. privater Modus) – Einstellung gilt nur für diese Sitzung
-    }
-  },
-};
-
-const numberFmt = new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const pctFmt = new Intl.NumberFormat('de-DE', {
-  style: 'percent',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-  signDisplay: 'exceptZero',
-});
-const compactFmt = new Intl.NumberFormat('de-DE', { notation: 'compact', maximumFractionDigits: 1 });
-const dateFmt = new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeZone: 'UTC' });
-
-const num = (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : numberFmt.format(v));
-const pct = (v) => (v === null || v === undefined || Number.isNaN(v) ? '–' : pctFmt.format(v));
-const date = (iso) => dateFmt.format(new Date(`${iso}T00:00:00Z`));
-const toneClass = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
-
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-// '#rrggbb' → 'rgba(r, g, b, a)' (die Chart-Bibliothek versteht kein color-mix())
-function withAlpha(hex, alpha) {
-  const m = hex.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-  if (!m) return hex;
-  const [r, g, b] = m.slice(1).map((x) => parseInt(x, 16));
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
+import { parseCsv } from './data.js';
+import { loadSeries, MissingApiKeyError } from './market.js';
+import { initDepot } from './depot.js';
+import { $, storage, numberFmt, compactFmt, num, pct, date, toneClass, cssVar, withAlpha } from './util.js';
 
 // ---------- Zustand ----------
 
@@ -380,27 +334,22 @@ async function load(rawSymbol) {
   showMessage('');
 
   try {
-    let bars;
-    let meta;
-    if (state.source === 'twelvedata') {
-      if (!state.apiKey) {
-        showMessage('Für echte Kursdaten bitte zuerst einen Twelve Data API-Key in den Einstellungen hinterlegen.', 'info');
-        openSettings();
-        return;
-      }
-      showMessage(`Lade Kursdaten für ${symbol} …`, 'info');
-      const res = await fetchTwelveData(symbol, state.apiKey);
-      bars = res.bars;
-      meta = { ...res.meta, source: 'twelvedata', sourceLabel: 'Twelve Data' };
-    } else {
-      bars = generateDemoBars(symbol);
-      meta = { name: symbol, source: 'demo', sourceLabel: 'Demodaten – simuliert, keine echten Kurse' };
-    }
+    if (state.source === 'twelvedata' && state.apiKey) showMessage(`Lade Kursdaten für ${symbol} …`, 'info');
+    const { bars, meta } = await loadSeries(symbol, {
+      source: state.source,
+      apiKey: state.apiKey,
+      onWait: (s) => showMessage(`API-Limit erreicht – neuer Versuch in ${s} Sekunden …`, 'info'),
+    });
     if (token !== loadToken) return; // eine neuere Anfrage läuft bereits
     setData(symbol, bars, meta);
     showMessage('');
   } catch (err) {
     if (token !== loadToken) return;
+    if (err instanceof MissingApiKeyError) {
+      showMessage(err.message, 'info');
+      openSettings();
+      return;
+    }
     showMessage(`Fehler beim Laden von ${symbol}: ${err.message}`);
   }
 }
@@ -408,9 +357,11 @@ async function load(rawSymbol) {
 function setData(symbol, bars, meta) {
   state.symbol = symbol;
   state.bars = bars;
+  state.loadedSource = meta.source;
   $('#symbol-input').value = symbol;
   if (meta.source !== 'csv') {
     history.replaceState(null, '', `#${encodeURIComponent(symbol)}`);
+    $('#nav-analysis').href = `#${encodeURIComponent(symbol)}`;
     storage.set('lastSymbol', symbol);
   }
   renderQuote(meta);
@@ -432,7 +383,9 @@ dialog.addEventListener('close', () => {
   if (dialog.returnValue !== 'save') return;
   state.apiKey = $('#api-key-input').value.trim();
   storage.set('twelvedataKey', state.apiKey);
-  if (state.apiKey && state.source === 'twelvedata' && state.symbol) load(state.symbol);
+  if (!state.apiKey || state.source !== 'twelvedata') return;
+  if (document.body.dataset.view === 'depot') depot.refresh();
+  else if (state.symbol) load(state.symbol);
 });
 
 // ---------- Event-Handler ----------
@@ -446,7 +399,8 @@ $('#source-select').value = state.source;
 $('#source-select').addEventListener('change', (e) => {
   state.source = e.target.value;
   storage.set('source', state.source);
-  if (state.symbol) load(state.symbol);
+  if (document.body.dataset.view === 'depot') depot.refresh();
+  else if (state.symbol) load(state.symbol);
 });
 
 $('#settings-button').addEventListener('click', openSettings);
@@ -498,10 +452,45 @@ $('#chart-type').addEventListener('change', (e) => {
   if (state.bars.length) renderCharts();
 });
 
-window.addEventListener('hashchange', () => {
-  const sym = decodeURIComponent(location.hash.slice(1));
-  if (sym && sym !== state.symbol) load(sym);
+$('#depot-add-current').addEventListener('click', () => {
+  if (!state.symbol) return;
+  const added = depot.addPosition(state.symbol);
+  showMessage(added ? `${state.symbol} wurde dem Depot hinzugefügt.` : `${state.symbol} ist bereits im Depot.`, 'info');
 });
+
+// ---------- Ansichten: Einzelanalyse (#SYMBOL) und Depot (#depot) ----------
+
+const depot = initDepot({
+  getSource: () => state.source,
+  getApiKey: () => state.apiKey,
+  openSettings,
+});
+
+function route() {
+  const hash = decodeURIComponent(location.hash.slice(1));
+  const view = hash.toLowerCase() === 'depot' ? 'depot' : 'analysis';
+  document.body.dataset.view = view;
+  document.querySelectorAll('.nav-tabs a').forEach((a) => {
+    const active = a.dataset.view === view;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  if (view === 'depot') {
+    document.title = 'Depot – Aktienanalyse';
+    depot.show();
+    return;
+  }
+  depot.hide();
+  $('#nav-analysis').href = state.symbol ? `#${encodeURIComponent(state.symbol)}` : '#';
+  const sym = hash || state.symbol || storage.get('lastSymbol', null) || state.watchlist[0] || 'AAPL';
+  // Nach einem Quellenwechsel in der Depot-Ansicht neu laden (CSV-Daten bleiben erhalten)
+  const staleSource = state.loadedSource !== 'csv' && state.loadedSource !== state.source;
+  if (sym !== state.symbol || staleSource) load(sym);
+  else if (state.symbol) document.title = `${state.symbol} – Aktienanalyse`;
+}
+
+window.addEventListener('hashchange', route);
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
@@ -509,4 +498,4 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', app
 
 applyTheme();
 renderWatchlist();
-load(decodeURIComponent(location.hash.slice(1)) || storage.get('lastSymbol', null) || state.watchlist[0] || 'AAPL');
+route();

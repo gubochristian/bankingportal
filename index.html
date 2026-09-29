@@ -8,14 +8,19 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 17l6-6 4 4 8-8' fill='none' stroke='%232f7de1' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
     <link rel="stylesheet" href="css/styles.css" />
   </head>
-  <body>
+  <body data-view="analysis">
     <header class="topbar">
       <div class="brand">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8" /></svg>
         <span>Aktienanalyse</span>
       </div>
 
-      <form id="search-form" class="search" autocomplete="off">
+      <nav class="nav-tabs" aria-label="Bereiche">
+        <a href="#" id="nav-analysis" data-view="analysis">Einzelanalyse</a>
+        <a href="#depot" data-view="depot">Depot</a>
+      </nav>
+
+      <form id="search-form" class="search analysis-only" autocomplete="off">
         <label class="sr-only" for="symbol-input">Symbol</label>
         <input id="symbol-input" name="symbol" placeholder="Symbol, z. B. AAPL, MSFT, SAP" required maxlength="20" />
         <button type="submit" class="btn primary">Analysieren</button>
@@ -29,7 +34,7 @@
             <option value="twelvedata">Twelve Data (API)</option>
           </select>
         </label>
-        <button type="button" class="btn" id="csv-button" title="Kursdaten aus CSV-Datei laden">CSV importieren</button>
+        <button type="button" class="btn analysis-only" id="csv-button" title="Kursdaten aus CSV-Datei laden">CSV importieren</button>
         <input type="file" id="csv-input" accept=".csv,.txt,text/csv" hidden />
         <button type="button" class="btn icon" id="settings-button" title="Einstellungen" aria-label="Einstellungen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
@@ -37,7 +42,7 @@
       </div>
     </header>
 
-    <div class="layout">
+    <div class="layout analysis-only">
       <aside class="card watchlist">
         <div class="card-head">
           <h2>Watchlist</h2>
@@ -61,7 +66,10 @@
               <div id="quote-change" class="change"></div>
             </div>
           </div>
-          <span id="source-badge" class="badge"></span>
+          <div class="quote-foot">
+            <span id="source-badge" class="badge"></span>
+            <button type="button" class="btn small" id="depot-add-current">+ Ins Depot</button>
+          </div>
         </section>
 
         <section class="card chart-card">
@@ -115,6 +123,190 @@
           Anlageberatung dar. Demodaten sind simuliert und bilden keine echten Kurse ab.
         </p>
       </main>
+    </div>
+
+    <div class="depot-layout depot-only">
+      <section class="card">
+        <div class="card-head wrap">
+          <div>
+            <h1>Mein Depot</h1>
+            <p class="muted small no-margin">Stelle dein Depot zusammen – die Bewertung aktualisiert sich automatisch.</p>
+          </div>
+          <div class="depot-actions">
+            <div class="segmented" id="depot-mode" role="group" aria-label="Erfassung">
+              <button type="button" data-mode="amount">Betrag in €</button>
+              <button type="button" data-mode="shares">Stückzahl</button>
+            </div>
+            <label class="select">
+              <span class="sr-only">Beispieldepot laden</span>
+              <select id="depot-example">
+                <option value="">Beispieldepot laden …</option>
+                <option value="balanced">Ausgewogen (ETF-Kern + Beimischung)</option>
+                <option value="tech">Tech-lastig (Klumpenrisiko)</option>
+                <option value="dax">Nur deutsche Einzelwerte</option>
+              </select>
+            </label>
+            <button type="button" class="btn" id="depot-clear">Leeren</button>
+          </div>
+        </div>
+
+        <form id="depot-add" class="depot-add" autocomplete="off">
+          <label class="field grow">
+            <span>Symbol</span>
+            <input id="depot-symbol" list="security-list" placeholder="z. B. URTH, AAPL, SAP" required maxlength="20" />
+          </label>
+          <label class="field">
+            <span id="depot-qty-label">Betrag in €</span>
+            <input id="depot-qty" type="number" min="0" step="any" required inputmode="decimal" />
+          </label>
+          <label class="field shares-only">
+            <span>Kaufkurs (optional)</span>
+            <input id="depot-buy" type="number" min="0" step="any" inputmode="decimal" />
+          </label>
+          <button type="submit" class="btn primary">Hinzufügen</button>
+        </form>
+        <datalist id="security-list"></datalist>
+
+        <div class="table-wrap">
+          <table class="positions" id="positions-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Anlageklasse</th>
+                <th>Sektor</th>
+                <th>Region</th>
+                <th>Währung</th>
+                <th class="num" id="qty-head">Betrag</th>
+                <th class="num shares-only">Kaufkurs</th>
+                <th class="num">Kurs</th>
+                <th class="num">Wert</th>
+                <th class="num">Gewicht</th>
+                <th class="num shares-only">G/V</th>
+                <th><span class="sr-only">Entfernen</span></th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+        <p class="muted small" id="depot-empty">Noch keine Positionen. Füge Werte hinzu oder lade ein Beispieldepot.</p>
+        <p class="muted small no-margin">
+          Sektor, Region und Anlageklasse sind für bekannte Werte vorbelegt und lassen sich pro Position anpassen.
+          Währungen werden nicht umgerechnet – alle Werte werden als Euro-Beträge behandelt.
+        </p>
+      </section>
+
+      <div id="depot-message" class="message" role="status" hidden></div>
+
+      <div id="depot-results" hidden>
+        <section class="kpis" aria-label="Kennzahlen des Depots">
+          <div class="kpi">
+            <div class="kpi-label">Depotwert</div>
+            <div class="kpi-value" id="kpi-value">–</div>
+            <div class="kpi-sub" id="kpi-pnl"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Risikoklasse</div>
+            <div class="kpi-value"><span id="kpi-risk">–</span><span class="kpi-unit"> / 7</span></div>
+            <div class="risk-scale" id="risk-scale" aria-hidden="true"></div>
+            <div class="kpi-sub" id="kpi-risk-label"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Streuung</div>
+            <div class="kpi-value"><span id="kpi-score">–</span><span class="kpi-unit"> / 100</span></div>
+            <div class="meter" aria-hidden="true"><div class="meter-fill" id="score-fill"></div></div>
+            <div class="kpi-sub" id="kpi-score-label"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Volatilität p. a.</div>
+            <div class="kpi-value" id="kpi-vol">–</div>
+            <div class="kpi-sub">Schwankungsbreite, letzte 12 Monate</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Max. Drawdown</div>
+            <div class="kpi-value" id="kpi-dd">–</div>
+            <div class="kpi-sub" id="kpi-dd-sub">größter zwischenzeitlicher Verlust</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Value at Risk (95 %, 1 Tag)</div>
+            <div class="kpi-value" id="kpi-var">–</div>
+            <div class="kpi-sub" id="kpi-var-sub"></div>
+          </div>
+        </section>
+
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head">
+              <h2>Hinweise &amp; Bewertung</h2>
+              <span class="muted small" id="hint-count"></span>
+            </div>
+            <ul class="hints" id="hints"></ul>
+          </section>
+
+          <section class="card">
+            <div class="card-head wrap">
+              <h2>Aufteilung</h2>
+              <div class="segmented small" id="alloc-tabs" role="tablist" aria-label="Aufteilung nach">
+                <button type="button" role="tab" data-alloc="positions">Positionen</button>
+                <button type="button" role="tab" data-alloc="sector" class="active">Sektoren</button>
+                <button type="button" role="tab" data-alloc="region">Regionen</button>
+                <button type="button" role="tab" data-alloc="type">Klassen</button>
+                <button type="button" role="tab" data-alloc="currency">Währung</button>
+              </div>
+            </div>
+            <div class="bars" id="alloc-bars"></div>
+            <p class="muted small no-margin" id="alloc-note"></p>
+          </section>
+        </div>
+
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head wrap">
+              <h2>Risikobeitrag je Position</h2>
+              <div class="legend">
+                <span><i class="key key-1"></i>Gewicht</span>
+                <span><i class="key key-2"></i>Anteil am Risiko</span>
+              </div>
+            </div>
+            <div class="bars paired" id="risk-bars"></div>
+            <p class="muted small no-margin">
+              Zeigt, welcher Anteil der gesamten Depotschwankung auf jede Position entfällt. Liegt der Risikoanteil deutlich
+              über dem Gewicht, schwankt die Position stark oder läuft eng mit dem Rest des Depots.
+            </p>
+          </section>
+
+          <section class="card">
+            <div class="card-head wrap">
+              <h2>Korrelationen</h2>
+              <div class="legend diverging">
+                <span>−1</span><i class="div-scale"></i><span>+1</span>
+              </div>
+            </div>
+            <div class="table-wrap"><table class="heatmap" id="corr-table"></table></div>
+            <p class="muted small no-margin" id="corr-note"></p>
+          </section>
+        </div>
+
+        <section class="card">
+          <div class="card-head wrap">
+            <h2>Wertentwicklung des heutigen Depots</h2>
+            <span class="muted small">Rückblick mit heutigen Stückzahlen (Buy &amp; Hold)</span>
+          </div>
+          <div id="depot-chart" class="chart depot-chart"></div>
+          <dl class="stats compact" id="depot-extra"></dl>
+        </section>
+
+        <details class="card method">
+          <summary>So wird bewertet</summary>
+          <ul>
+            <li><strong>Risikoklasse 1–7</strong> nach annualisierter Volatilität der letzten 12 Monate, angelehnt an die SRI-Skala der EU-Basisinformationsblätter (&lt; 0,5 %, 5 %, 12 %, 20 %, 30 %, 80 %, darüber).</li>
+            <li><strong>Streuungs-Score 0–100:</strong> effektive Anzahl Positionen (30 Punkte, voll ab 20), Sektoren (25, voll ab 8), Regionen (20, voll ab 3) und durchschnittliche Korrelation (25, voll bei ≤ 0,2). Breite ETFs zählen intern als 50 Titel, Branchen-ETFs als 20; globale Fonds werden anteilig auf Regionen verteilt.</li>
+            <li><strong>Effektive Anzahl</strong> = 1 / Herfindahl-Index der Gewichte – so viele gleich große Positionen hätten dieselbe Konzentration.</li>
+            <li><strong>Value at Risk (95 %)</strong>: historischer Tagesverlust, der an 95 % der Tage des letzten Jahres nicht überschritten wurde.</li>
+            <li><strong>Risikobeitrag</strong>: Gewicht × Kovarianz der Position mit dem Depot, geteilt durch die Depotvarianz.</li>
+          </ul>
+          <p class="muted small no-margin">Alle Auswertungen beruhen auf historischen Kursen und sind keine Prognose und keine Anlageberatung.</p>
+        </details>
+      </div>
     </div>
 
     <dialog id="settings-dialog">

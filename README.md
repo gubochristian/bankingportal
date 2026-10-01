@@ -25,7 +25,16 @@ Depot aus Aktien, ETFs, Anleihen-ETFs und Rohstoffen zusammenstellen – per Bet
 - **Aufteilung** nach Positionen, Sektoren, Regionen (globale ETFs anteilig „durchgeschaut“), Anlageklassen und Währungen
 - **Risikobeitrag je Position** – welche Position wie viel der Depotschwankung verursacht
 - **Korrelationsmatrix** der Positionen
-- **Wertentwicklung** des heutigen Depots im Rückblick (Buy & Hold)
+- **Wertentwicklung** des heutigen Depots im Rückblick (Buy & Hold) im Vergleich zu einem wählbaren Index
+  (MSCI World, FTSE All-World, S&P 500, FTSE Europe, Emerging Markets)
+- **Beta zum Markt** und Korrelation zum Vergleichsindex
+- **Laufende Kosten (TER)**, gewichtet über das Depot, in € pro Jahr und über 10 Jahre (Richtwerte für bekannte ETFs, editierbar)
+- **Stresstest** mit fünf Szenarien: Aktien-Crash (−30 %), Marktkorrektur (−10 %), platzende Tech-Blase,
+  starker Zinsanstieg, Euro-Aufwertung – jeweils mit Verlust in % und € und den größten Verlusttreibern
+- **Verbesserungsvorschläge:** simulierte Umschichtungen (Welt-ETF als Kern, Anleihen- oder Goldbeimischung,
+  Einzelwerte auf 10 % begrenzen, Sektor-Übergewicht abbauen, Gleichgewichtung) mit Vorher-/Nachher-Vergleich
+  von Streuung, Risikoklasse, Volatilität und Crash-Verlust – per Klick übernehmbar
+- **Mehrere Depots** anlegen, umbenennen, löschen sowie als JSON-Datei **exportieren und importieren**
 - **Hinweise** mit Einstufung (Kritisch / Warnung / Hinweis / Positiv), u. a. zu Klumpenrisiken, Sektor- und
   Regionen-Übergewichten, Home Bias, Fremdwährungsanteil, fehlendem Stabilitätsanker, hoher Korrelation und schwachem Trend
 
@@ -58,7 +67,9 @@ index.html            Seitenaufbau
 css/styles.css        Layout und Farben (Hell/Dunkel)
 js/app.js             Einzelanalyse (UI, Charts) und Navigation
 js/depot.js           Depot-Ansicht (Erfassung, Darstellung der Bewertung)
-js/portfolio.js       Depot-Bewertung: Allokation, Risiko, Score, Hinweise (reine Funktionen)
+js/portfolio.js       Depot-Bewertung: Allokation, Risiko, Benchmark, Stresstests, Kosten, Hinweise
+js/optimizer.js       Verbesserungsvorschläge durch simulierte Umschichtungen
+js/depot-file.js      Export-/Importformat für Depots
 js/securities.js      Stammdaten bekannter Wertpapiere (Sektor, Region, Klasse, Währung)
 js/indicators.js      SMA, EMA, RSI, MACD, Bollinger (reine Funktionen)
 js/analysis.js        Kennzahlen und Signale

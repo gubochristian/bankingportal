@@ -127,11 +127,23 @@
 
     <div class="depot-layout depot-only">
       <section class="card">
-        <div class="card-head wrap">
-          <div>
-            <h1>Mein Depot</h1>
-            <p class="muted small no-margin">Stelle dein Depot zusammen – die Bewertung aktualisiert sich automatisch.</p>
+        <div class="depot-manage">
+          <label class="select depot-picker">
+            <span class="sr-only">Depot auswählen</span>
+            <select id="depot-select"></select>
+          </label>
+          <div class="depot-manage-actions">
+            <button type="button" class="btn small" id="depot-new">+ Neues Depot</button>
+            <button type="button" class="btn small" id="depot-rename">Umbenennen</button>
+            <button type="button" class="btn small" id="depot-delete">Löschen</button>
+            <button type="button" class="btn small" id="depot-export" title="Depot als JSON-Datei speichern">Exportieren</button>
+            <button type="button" class="btn small" id="depot-import" title="Depot aus JSON-Datei laden">Importieren</button>
+            <input type="file" id="depot-import-file" accept=".json,application/json" hidden />
           </div>
+        </div>
+
+        <div class="card-head wrap">
+          <p class="muted small no-margin">Stelle dein Depot zusammen – die Bewertung aktualisiert sich automatisch.</p>
           <div class="depot-actions">
             <div class="segmented" id="depot-mode" role="group" aria-label="Erfassung">
               <button type="button" data-mode="amount">Betrag in €</button>
@@ -176,6 +188,7 @@
                 <th>Sektor</th>
                 <th>Region</th>
                 <th>Währung</th>
+                <th class="num" title="Laufende Kosten pro Jahr (Total Expense Ratio)">TER %</th>
                 <th class="num" id="qty-head">Betrag</th>
                 <th class="num shares-only">Kaufkurs</th>
                 <th class="num">Kurs</th>
@@ -191,7 +204,7 @@
         <p class="muted small" id="depot-empty">Noch keine Positionen. Füge Werte hinzu oder lade ein Beispieldepot.</p>
         <p class="muted small no-margin">
           Sektor, Region und Anlageklasse sind für bekannte Werte vorbelegt und lassen sich pro Position anpassen.
-          Währungen werden nicht umgerechnet – alle Werte werden als Euro-Beträge behandelt.
+          Währungen werden nicht umgerechnet – alle Werte werden als Euro-Beträge behandelt. TER-Werte bekannter ETFs sind Richtwerte.
         </p>
       </section>
 
@@ -225,6 +238,16 @@
             <div class="kpi-label">Max. Drawdown</div>
             <div class="kpi-value" id="kpi-dd">–</div>
             <div class="kpi-sub" id="kpi-dd-sub">größter zwischenzeitlicher Verlust</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Beta zum Markt</div>
+            <div class="kpi-value" id="kpi-beta">–</div>
+            <div class="kpi-sub" id="kpi-beta-sub"></div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Laufende Kosten</div>
+            <div class="kpi-value" id="kpi-ter">–</div>
+            <div class="kpi-sub" id="kpi-ter-sub"></div>
           </div>
           <div class="kpi">
             <div class="kpi-label">Value at Risk (95 %, 1 Tag)</div>
@@ -261,6 +284,31 @@
         <div class="grid-2">
           <section class="card">
             <div class="card-head wrap">
+              <h2>Verbesserungsvorschläge</h2>
+              <span class="muted small">simulierte Umschichtungen bei gleichem Depotwert</span>
+            </div>
+            <ul class="suggestions" id="suggestions"></ul>
+          </section>
+
+          <section class="card">
+            <div class="card-head wrap">
+              <h2>Stresstest</h2>
+              <div class="legend">
+                <span><i class="key key-loss"></i>Verlust</span>
+                <span><i class="key key-gain"></i>Gewinn</span>
+              </div>
+            </div>
+            <div class="scenarios" id="scenarios"></div>
+            <p class="muted small no-margin">
+              Hypothetische Szenarien mit vereinfachten Annahmen je Anlageklasse und Sektor. Beim Marktszenario wird die
+              gemessene Marktsensitivität (Beta) jeder Position berücksichtigt. Keine Prognose.
+            </p>
+          </section>
+        </div>
+
+        <div class="grid-2">
+          <section class="card">
+            <div class="card-head wrap">
               <h2>Risikobeitrag je Position</h2>
               <div class="legend">
                 <span><i class="key key-1"></i>Gewicht</span>
@@ -288,8 +336,26 @@
 
         <section class="card">
           <div class="card-head wrap">
-            <h2>Wertentwicklung des heutigen Depots</h2>
-            <span class="muted small">Rückblick mit heutigen Stückzahlen (Buy &amp; Hold)</span>
+            <div>
+              <h2>Wertentwicklung des heutigen Depots</h2>
+              <span class="muted small">Rückblick mit heutigen Stückzahlen (Buy &amp; Hold)</span>
+            </div>
+            <div class="history-controls">
+              <div class="legend">
+                <span><i class="key key-1"></i>Depot</span>
+                <span><i class="key key-2"></i><span id="bench-legend">Vergleichsindex</span></span>
+              </div>
+              <label class="select compact">
+                <span class="sr-only">Vergleichsindex</span>
+                <select id="benchmark-select">
+                  <option value="URTH">MSCI World</option>
+                  <option value="VT">FTSE All-World</option>
+                  <option value="SPY">S&amp;P 500</option>
+                  <option value="VGK">FTSE Europe</option>
+                  <option value="EEM">MSCI Emerging Markets</option>
+                </select>
+              </label>
+            </div>
           </div>
           <div id="depot-chart" class="chart depot-chart"></div>
           <dl class="stats compact" id="depot-extra"></dl>
@@ -303,6 +369,10 @@
             <li><strong>Effektive Anzahl</strong> = 1 / Herfindahl-Index der Gewichte – so viele gleich große Positionen hätten dieselbe Konzentration.</li>
             <li><strong>Value at Risk (95 %)</strong>: historischer Tagesverlust, der an 95 % der Tage des letzten Jahres nicht überschritten wurde.</li>
             <li><strong>Risikobeitrag</strong>: Gewicht × Kovarianz der Position mit dem Depot, geteilt durch die Depotvarianz.</li>
+            <li><strong>Beta</strong>: Kovarianz der Depotrenditen mit dem Vergleichsindex, geteilt durch dessen Varianz (letzte 12 Monate). Beta 1,2 heißt: Das Depot schwankt im Schnitt 20 % stärker als der Index.</li>
+            <li><strong>Laufende Kosten</strong>: Gewichtete TER aller Positionen (Einzelaktien 0 %). Die 10-Jahres-Kosten unterstellen 5 % Bruttorendite p. a. und enthalten den entgangenen Zinseszins.</li>
+            <li><strong>Verbesserungsvorschläge</strong> werden mit derselben Bewertung durchgerechnet; angezeigt werden nur Umschichtungen, die den Streuungs-Score um mindestens 5 Punkte erhöhen oder die Volatilität um mindestens 1,5 Prozentpunkte senken.</li>
+            <li>Die verwendeten US-ETFs dienen als Datenquelle. Privatanleger in der EU kaufen in der Regel vergleichbare UCITS-ETFs (z. B. auf den MSCI World).</li>
           </ul>
           <p class="muted small no-margin">Alle Auswertungen beruhen auf historischen Kursen und sind keine Prognose und keine Anlageberatung.</p>
         </details>

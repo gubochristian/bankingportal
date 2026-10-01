@@ -1,10 +1,12 @@
 // Depot-Bewertung: Allokation, Streuung, Risiko und regelbasierte Hinweise.
 // Reine Funktionen ohne DOM-Zugriff.
 //
-// Eingabe `positions`: [{ symbol, name, value, costBasis?, type, sector, region, currency, regionBreakdown? }]
+// Eingabe `positions`: [{ symbol, name, value, costBasis?, ter?, type, sector, region, currency, regionBreakdown? }]
 //   value      – aktueller Marktwert der Position
 //   costBasis  – Einstandswert (optional, für Gewinn/Verlust)
+//   ter        – laufende Kosten p. a. als Anteil (0.002 = 0,2 %), optional
 // Eingabe `series`: { [symbol]: bars } mit Tageskursen (aufsteigend sortiert)
+// Option `benchmark`: { symbol, name, bars } – Vergleichsindex für Beta und Stresstests
 
 import { sma } from './indicators.js';
 import { maxDrawdown } from './analysis.js';
@@ -96,7 +98,7 @@ export function covariance(a, b) {
 
 // ---------- Hauptfunktion ----------
 
-export function analyzePortfolio(positions, series, { lookback = TRADING_DAYS } = {}) {
+export function analyzePortfolio(positions, series, { lookback = TRADING_DAYS, benchmark = null } = {}) {
   const valid = positions.filter((p) => p.value > 0);
   const totalValue = sum(valid.map((p) => p.value));
   if (!valid.length || totalValue <= 0) return null;
@@ -149,15 +151,36 @@ export function analyzePortfolio(positions, series, { lookback = TRADING_DAYS } 
   };
 
   // --- Risiko aus der Kurshistorie ---
-  const risk = computeRisk(valid, weights, series, symbols, lookback, totalValue);
+  const risk = computeRisk(valid, weights, series, symbols, lookback, totalValue, benchmark);
 
-  const result = { totalValue, costBasis: withCost.length ? costBasis : null, pnl, pnlPct: pnl !== null ? pnl / costBasis : null, allocation, concentration, ...risk };
+  // --- Laufende Kosten (TER) ---
+  const annualCost = sum(valid.map((p) => p.value * (p.ter ?? 0)));
+  const fundValue = sum(valid.map((p) => (p.type.includes('ETF') || p.type === 'Rohstoff' ? p.value : 0)));
+  const costs = {
+    annualCost,
+    weightedTer: annualCost / totalValue,
+    fundTer: fundValue > 0 ? annualCost / fundValue : null,
+    // Renditeverlust über 10 Jahre durch Kosten (vereinfachend bei 5 % Bruttorendite p. a.)
+    tenYearCost: totalValue * (1.05 ** 10 - (1.05 - annualCost / totalValue) ** 10),
+  };
+
+  const result = {
+    totalValue,
+    costBasis: withCost.length ? costBasis : null,
+    pnl,
+    pnlPct: pnl !== null ? pnl / costBasis : null,
+    allocation,
+    concentration,
+    costs,
+    ...risk,
+  };
+  result.scenarios = runScenarios(valid, weights, totalValue, risk.benchmark?.positionBetas ?? {});
   result.score = diversificationScore(concentration, risk.avgCorrelation);
   result.hints = buildHints(result, valid);
   return result;
 }
 
-function computeRisk(positions, weights, series, symbols, lookback, totalValue) {
+function computeRisk(positions, weights, series, symbols, lookback, totalValue, benchmark) {
   const empty = { history: [], volatility: null, riskClass: null, riskContributions: [], correlation: null, avgCorrelation: null };
   if (symbols.some((s) => !series[s] || series[s].length < 2)) return empty;
 
@@ -242,7 +265,116 @@ function computeRisk(positions, weights, series, symbols, lookback, totalValue) 
     correlation: { symbols, matrix: corr },
     riskContributions,
     belowSma200Share: trendCovered > 0 ? belowSma200 / trendCovered : null,
+    benchmark: benchmark?.bars?.length ? compareBenchmark(benchmark, dates, values, closes, symbols, window) : null,
   };
+}
+
+// Vergleich mit einem Index: Beta, Korrelation, Rendite und normierter Verlauf
+function compareBenchmark(benchmark, dates, values, closes, symbols, window) {
+  const byDate = new Map(benchmark.bars.map((b) => [b.time, b.close]));
+  let last = null;
+  const bench = dates.map((d) => (last = byDate.get(d) ?? last));
+  const start = bench.findIndex((v) => v !== null);
+  if (start === -1 || dates.length - start < 30) return null;
+
+  const from = Math.max(start, dates.length - 1 - window);
+  const benchRet = logReturns(bench.slice(from));
+  const portRet = logReturns(values.slice(from));
+  const benchVar = covariance(benchRet, benchRet);
+  const portVar = covariance(portRet, portRet);
+  const cov = covariance(portRet, benchRet);
+
+  const positionBetas = {};
+  symbols.forEach((s) => {
+    positionBetas[s] = benchVar > 0 ? covariance(logReturns(closes[s].slice(from)), benchRet) / benchVar : null;
+  });
+
+  const n = values.length;
+  const scale = values[start] / bench[start];
+  return {
+    symbol: benchmark.symbol,
+    name: benchmark.name ?? benchmark.symbol,
+    beta: benchVar > 0 ? cov / benchVar : null,
+    correlation: benchVar > 0 && portVar > 0 ? cov / Math.sqrt(benchVar * portVar) : null,
+    volatility: Math.sqrt(benchVar * TRADING_DAYS),
+    return1y: n - start > TRADING_DAYS ? bench[n - 1] / bench[n - 1 - TRADING_DAYS] - 1 : null,
+    maxDrawdown: maxDrawdown(bench.slice(start)),
+    // auf den Depotwert am ersten gemeinsamen Tag normiert
+    history: dates.slice(start).map((time, i) => ({ time, value: bench[start + i] * scale })),
+    positionBetas,
+  };
+}
+
+// ---------- Stresstests ----------
+// Hypothetische Szenarien mit vereinfachten Annahmen je Anlageklasse/Sektor.
+// Beim Marktszenario wird die gemessene Marktsensitivität (Beta) jeder Position genutzt.
+
+const isFund = (p) => p.type.includes('ETF');
+
+export const SCENARIOS = [
+  {
+    key: 'crash',
+    title: 'Aktienmarkt-Crash (−30 %)',
+    description: 'Breiter Aktienmarkt fällt um 30 %, wie 2008 oder im März 2020. Anleihen und Gold gelten als „sicherer Hafen“.',
+    shock: (p, beta) => {
+      if (p.type === 'Anleihen-ETF') return 0.03;
+      if (p.sector === 'Edelmetalle') return 0.08;
+      if (p.type === 'Krypto') return -0.5;
+      return -0.3 * (beta ?? (p.type === 'Sonstige' ? 0.5 : 1));
+    },
+  },
+  {
+    key: 'correction',
+    title: 'Marktkorrektur (−10 %)',
+    description: 'Typischer Rücksetzer, der statistisch etwa alle ein bis zwei Jahre vorkommt.',
+    shock: (p, beta) => {
+      if (p.type === 'Anleihen-ETF') return 0.01;
+      if (p.sector === 'Edelmetalle') return 0.02;
+      if (p.type === 'Krypto') return -0.2;
+      return -0.1 * (beta ?? 1);
+    },
+  },
+  {
+    key: 'tech',
+    title: 'Tech-Blase platzt',
+    description: 'Technologie −35 %, Kommunikation −25 %, zyklischer Konsum −15 %; breite Indizes −12 %, übrige Aktien −5 %.',
+    shock: (p) => {
+      const bySector = { Technologie: -0.35, Kommunikation: -0.25, 'Zyklischer Konsum': -0.15, Diversifiziert: -0.12, Anleihen: 0.01, Edelmetalle: 0.02 };
+      if (p.type === 'Krypto') return -0.4;
+      return bySector[p.sector] ?? (isEquity(p) ? -0.05 : 0);
+    },
+  },
+  {
+    key: 'rates',
+    title: 'Kräftiger Zinsanstieg (+2 Prozentpunkte)',
+    description: 'Anleihekurse fallen, zinssensible Branchen (Immobilien, Versorger, Wachstumswerte) leiden, Banken profitieren leicht.',
+    shock: (p) => {
+      if (p.type === 'Anleihen-ETF') return -0.1;
+      const bySector = { Immobilien: -0.18, Versorger: -0.12, Technologie: -0.12, Finanzen: 0.03, Diversifiziert: -0.07, Edelmetalle: -0.05 };
+      return bySector[p.sector] ?? (isEquity(p) ? -0.06 : -0.03);
+    },
+  },
+  {
+    key: 'fx',
+    title: 'Euro wertet um 10 % auf',
+    description: 'Alle nicht in Euro notierten Werte verlieren umgerechnet rund 9 % – unabhängig von ihrer Kursentwicklung.',
+    shock: (p) => (p.currency !== 'EUR' ? 1 / 1.1 - 1 : 0),
+  },
+];
+
+export function runScenarios(positions, weights, totalValue, betas) {
+  return SCENARIOS.map((sc) => {
+    const impacts = positions.map((p, i) => ({ symbol: p.symbol, impact: sc.shock(p, isFund(p) || p.type === 'Aktie' ? betas[p.symbol] : null) * weights[i] }));
+    const impact = sum(impacts.map((x) => x.impact));
+    return {
+      key: sc.key,
+      title: sc.title,
+      description: sc.description,
+      impact,
+      amount: impact * totalValue,
+      drivers: impacts.filter((x) => x.impact < 0).sort((a, b) => a.impact - b.impact).slice(0, 3),
+    };
+  });
 }
 
 // ---------- Streuungs-Score ----------
@@ -264,6 +396,7 @@ export function diversificationScore(c, avgCorrelation) {
 // ---------- Hinweise ----------
 
 const pct = (v) => `${(v * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 })} %`;
+const pct2 = (v) => `${(v * 100).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} %`;
 
 function buildHints(r, positions) {
   const hints = [];
@@ -353,6 +486,27 @@ function buildHints(r, positions) {
   }
   if (r.belowSma200Share !== null && r.belowSma200Share !== undefined && r.belowSma200Share > 0.5) {
     add('info', 'Schwacher Trend', `${pct(r.belowSma200Share)} des Depots notieren unter ihrer 200-Tage-Linie.`);
+  }
+
+  // Markt-Sensitivität
+  const b = r.benchmark;
+  if (b?.beta !== null && b?.beta !== undefined) {
+    if (b.beta > 1.2) {
+      add('warning', `Überdurchschnittlich marktsensitiv (Beta ${b.beta.toFixed(2)})`, `Bewegt sich der ${b.name} um 10 %, schwankt das Depot im Schnitt um ~${Math.round(b.beta * 10)} %.`);
+    } else if (b.beta < 0.6) {
+      add('good', `Defensiv aufgestellt (Beta ${b.beta.toFixed(2)})`, `Das Depot reagiert deutlich schwächer auf Marktbewegungen als der ${b.name}.`);
+    }
+  }
+  const crash = r.scenarios.find((sc) => sc.key === 'crash');
+  if (crash && crash.impact < -0.35) {
+    add('warning', 'Hoher Verlust im Crash-Szenario', `Bei einem Marktrückgang von 30 % wäre mit etwa ${pct(-crash.impact)} Verlust zu rechnen. Prüfe, ob du das aushalten würdest, ohne zu verkaufen.`);
+  }
+
+  // Kosten
+  if (r.costs.fundTer !== null && r.costs.fundTer > 0.006) {
+    add('warning', 'Teure Fonds', `Die Fonds im Depot kosten im Schnitt ${pct2(r.costs.fundTer)} pro Jahr. Breite Index-ETFs gibt es ab etwa 0,1–0,2 %.`);
+  } else if (r.costs.fundTer !== null && r.costs.fundTer <= 0.003 && r.costs.annualCost > 0) {
+    add('good', 'Günstige Fonds', `Ø laufende Kosten der Fonds: ${pct2(r.costs.fundTer)} pro Jahr.`);
   }
 
   const order = { critical: 0, warning: 1, info: 2, good: 3 };

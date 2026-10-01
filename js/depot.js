@@ -3,6 +3,8 @@
 import { createChart, CrosshairMode } from './vendor/lightweight-charts.mjs';
 import { loadSeries, MissingApiKeyError } from './market.js';
 import { analyzePortfolio, RISK_CLASS_LABELS } from './portfolio.js';
+import { suggestImprovements, HELPER_SYMBOLS } from './optimizer.js';
+import { parseDepotFile, BENCHMARK_NAMES } from './depot-file.js';
 import { ASSET_CLASSES, SECTORS, REGIONS, CURRENCIES, SECURITIES, lookupSecurity, defaultMeta } from './securities.js';
 import { $, storage, num, pct, pct1, eur, numberFmt, cssVar, withAlpha, toneClass } from './util.js';
 
@@ -24,22 +26,114 @@ const LEVEL_LABEL = { critical: 'Kritisch', warning: 'Warnung', info: 'Hinweis',
 const LEVEL_ICON = { critical: '✕', warning: '!', info: 'i', good: '✓' };
 
 let nextId = 1;
-const newId = () => `p${Date.now().toString(36)}${nextId++}`;
+const newId = (prefix = 'p') => `${prefix}${Date.now().toString(36)}${nextId++}`;
+
+// Gespeicherte Depots laden; übernimmt das Einzeldepot aus der Vorversion
+function loadDepots() {
+  const saved = storage.get('depots', null);
+  if (saved?.list?.length) return saved;
+  const legacy = storage.get('depot', null);
+  const first = { id: newId('d'), name: 'Mein Depot', mode: 'amount', positions: [], benchmark: 'URTH', ...(legacy ?? {}) };
+  return { activeId: first.id, list: [first] };
+}
 
 export function initDepot({ getSource, getApiKey, openSettings }) {
+  const depots = loadDepots();
+  const active = () => depots.list.find((d) => d.id === depots.activeId) ?? depots.list[0];
+
   const state = {
-    mode: 'amount',
-    positions: [],
-    ...storage.get('depot', {}),
+    mode: active().mode ?? 'amount',
+    positions: active().positions ?? [],
+    benchmark: active().benchmark ?? 'URTH',
     series: {}, // symbol → bars (für die aktuelle Quelle)
     errors: {}, // symbol → Fehlermeldung
+    extraErrors: new Set(), // Vergleichsindex/Bausteine ohne Kurse
     allocTab: storage.get('depotAllocTab', 'sector'),
     visible: false,
     loadToken: 0,
     result: null,
+    suggestions: [],
   };
 
-  const save = () => storage.set('depot', { mode: state.mode, positions: state.positions });
+  function save() {
+    Object.assign(active(), { mode: state.mode, positions: state.positions, benchmark: state.benchmark });
+    storage.set('depots', depots);
+  }
+
+  // ---------- Mehrere Depots ----------
+
+  function renderDepotSelect() {
+    const sel = $('#depot-select');
+    sel.replaceChildren(...depots.list.map((d) => new Option(d.name, d.id, false, d.id === depots.activeId)));
+    $('#depot-delete').disabled = depots.list.length < 2;
+  }
+
+  function switchDepot(id) {
+    depots.activeId = id;
+    const d = active();
+    state.mode = d.mode ?? 'amount';
+    state.positions = d.positions ?? [];
+    state.benchmark = d.benchmark ?? 'URTH';
+    storage.set('depots', depots);
+    renderDepotSelect();
+    renderMode();
+    $('#benchmark-select').value = state.benchmark;
+    refresh();
+  }
+
+  function createDepot(name, data = {}) {
+    const d = { id: newId('d'), name, mode: 'amount', positions: [], benchmark: 'URTH', ...data };
+    depots.list.push(d);
+    switchDepot(d.id);
+  }
+
+  $('#depot-select').addEventListener('change', (e) => switchDepot(e.target.value));
+
+  $('#depot-new').addEventListener('click', () => {
+    const name = prompt('Name des neuen Depots:', `Depot ${depots.list.length + 1}`);
+    if (name?.trim()) createDepot(name.trim());
+  });
+
+  $('#depot-rename').addEventListener('click', () => {
+    const name = prompt('Neuer Name:', active().name);
+    if (!name?.trim()) return;
+    active().name = name.trim();
+    save();
+    renderDepotSelect();
+  });
+
+  $('#depot-delete').addEventListener('click', () => {
+    if (depots.list.length < 2 || !confirm(`Depot „${active().name}“ endgültig löschen?`)) return;
+    depots.list = depots.list.filter((d) => d.id !== depots.activeId);
+    switchDepot(depots.list[0].id);
+  });
+
+  $('#depot-export').addEventListener('click', () => {
+    const d = active();
+    const data = { format: 'aktienanalyse-depot', version: 1, name: d.name, mode: state.mode, benchmark: state.benchmark, positions: state.positions };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(blob),
+      download: `${d.name.replace(/[^\wäöüÄÖÜß-]+/g, '_')}.json`,
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+
+  $('#depot-import').addEventListener('click', () => $('#depot-import-file').click());
+  $('#depot-import-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const data = parseDepotFile(await file.text());
+      if (depots.list.some((d) => d.name === data.name)) data.name = `${data.name} (Import)`;
+      createDepot(data.name, data);
+      showMessage(`Depot „${data.name}“ mit ${data.positions.length} Positionen importiert.`, 'info');
+    } catch (err) {
+      showMessage(`Import fehlgeschlagen: ${err.message}`);
+    }
+  });
 
   // ---------- Formular & Auswahllisten ----------
 
@@ -214,6 +308,12 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
           td(select(SECTORS, p.sector, (x) => update(p, 'sector', x), `Sektor ${p.symbol}`)),
           td(select(REGIONS, p.region, (x) => update(p, 'region', x), `Region ${p.symbol}`)),
           td(select(CURRENCIES, p.currency, (x) => update(p, 'currency', x), `Währung ${p.symbol}`)),
+          td(
+            p.type === 'Aktie'
+              ? '–'
+              : numberInput(terOf(p) === null ? null : round(terOf(p) * 100, 3), (x) => update(p, 'ter', x === null ? null : x / 100), `TER in Prozent ${p.symbol}`),
+            'num ter',
+          ),
           td(numberInput(p[qtyField], (x) => update(p, qtyField, x), `${state.mode === 'amount' ? 'Betrag' : 'Stückzahl'} ${p.symbol}`), 'num'),
           td(numberInput(p.buyPrice, (x) => update(p, 'buyPrice', x), `Kaufkurs ${p.symbol}`), 'num shares-only'),
           td(v.last ? num(v.last) : '…', 'num'),
@@ -227,6 +327,12 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     );
     $('#depot-empty').hidden = state.positions.length > 0;
     $('#positions-table').hidden = state.positions.length === 0;
+  }
+
+  // TER: eigener Wert der Position, sonst Richtwert aus den Stammdaten
+  function terOf(p) {
+    if (p.type === 'Aktie') return 0;
+    return p.ter === undefined ? (lookupSecurity(p.symbol)?.ter ?? null) : p.ter;
   }
 
   // Aktueller Wert jeder Position aus Menge bzw. Betrag und letztem Kurs
@@ -257,6 +363,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     if (source !== loadedSource) {
       state.series = {};
       state.errors = {};
+      state.extraErrors = new Set();
       loadedSource = source;
     }
     renderTable();
@@ -284,6 +391,21 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       }
     }
     if (token !== state.loadToken) return;
+
+    // Vergleichsindex und Bausteine für Vorschläge (Fehler hier sind nicht kritisch)
+    const extras = [state.benchmark, ...Object.values(HELPER_SYMBOLS)].filter((s) => !state.series[s] && !state.extraErrors.has(s));
+    for (const symbol of [...new Set(extras)]) {
+      if (source === 'twelvedata') showMessage(`Lade Vergleichsdaten … (${symbol})`, 'info');
+      try {
+        const { bars } = await loadSeries(symbol, { source, apiKey: getApiKey(), onWait: (s) => showMessage(`API-Limit erreicht – weiter in ${s} Sekunden …`, 'info') });
+        if (token !== state.loadToken) return;
+        state.series[symbol] = bars;
+      } catch {
+        if (token !== state.loadToken) return;
+        state.extraErrors.add(symbol);
+      }
+    }
+    if (token !== state.loadToken) return;
     showMessage(
       Object.keys(state.errors).length
         ? `Für ${Object.keys(state.errors).join(', ')} konnten keine Kurse geladen werden – diese Positionen fließen nicht in die Bewertung ein.`
@@ -293,27 +415,35 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     evaluate();
   }
 
+  function toInput(p, value, costBasis = null) {
+    const known = lookupSecurity(p.symbol);
+    return {
+      symbol: p.symbol,
+      name: p.name,
+      value,
+      costBasis,
+      ter: terOf(p) ?? 0,
+      type: p.type,
+      sector: p.sector,
+      region: p.region,
+      currency: p.currency,
+      regionBreakdown: p.region === 'Global' && known?.region === 'Global' ? known.regions : undefined,
+    };
+  }
+
+  // Stammdaten für Bausteine, die ein Vorschlag neu ins Depot bringt
+  const makeMeta = (symbol) => toInput({ symbol, ...stripKnown(defaultMeta(symbol)) }, 0);
+
   function evaluate() {
     const values = positionValues();
     const input = state.positions
       .map((p, i) => ({ p, v: values[i] }))
       .filter(({ p, v }) => v.value > 0 && state.series[p.symbol])
-      .map(({ p, v }) => {
-        const known = lookupSecurity(p.symbol);
-        return {
-          symbol: p.symbol,
-          name: p.name,
-          value: v.value,
-          costBasis: v.costBasis,
-          type: p.type,
-          sector: p.sector,
-          region: p.region,
-          currency: p.currency,
-          regionBreakdown: p.region === 'Global' && known?.region === 'Global' ? known.regions : undefined,
-        };
-      });
-    const series = Object.fromEntries(input.map((p) => [p.symbol, state.series[p.symbol]]));
-    state.result = input.length ? analyzePortfolio(input, series) : null;
+      .map(({ p, v }) => toInput(p, v.value, v.costBasis));
+    const bmBars = state.series[state.benchmark];
+    const benchmark = bmBars ? { symbol: state.benchmark, name: BENCHMARK_NAMES[state.benchmark] ?? state.benchmark, bars: bmBars } : null;
+    state.result = input.length ? analyzePortfolio(input, state.series, { benchmark }) : null;
+    state.suggestions = state.result ? suggestImprovements(input, state.series, state.result, { benchmark, makeMeta }) : [];
     renderResults();
   }
 
@@ -350,7 +480,18 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     $('#kpi-var').textContent = r.var95 === undefined ? '–' : pct1(-r.var95);
     $('#kpi-var-sub').textContent = r.var95Amount !== undefined ? `≈ ${eur(-r.var95Amount)} an einem schlechten Tag` : '';
 
+    const b = r.benchmark;
+    $('#kpi-beta').textContent = b?.beta == null ? '–' : numberFmt.format(b.beta);
+    $('#kpi-beta-sub').textContent = b?.beta == null ? 'kein Vergleichsindex' : `zum ${b.name} · ${b.beta > 1.1 ? 'schwankt stärker' : b.beta < 0.9 ? 'schwankt schwächer' : 'schwankt ähnlich'}`;
+    const noCosts = r.costs.annualCost < 0.5;
+    $('#kpi-ter').textContent = noCosts ? '0 %' : pct2(r.costs.weightedTer);
+    $('#kpi-ter-sub').textContent = noCosts
+      ? 'keine Fondskosten (Ordergebühren nicht erfasst)'
+      : `≈ ${eur(r.costs.annualCost)} pro Jahr · ${eur(r.costs.tenYearCost)} in 10 Jahren`;
+
     renderHints(r.hints);
+    renderSuggestions();
+    renderScenarios(r);
     renderAllocation();
     renderRiskBars(r);
     renderCorrelation(r);
@@ -458,6 +599,113 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     );
   }
 
+  // ---------- Stresstest ----------
+
+  function renderScenarios(r) {
+    const max = Math.max(0.1, ...r.scenarios.map((sc) => Math.abs(sc.impact)));
+    $('#scenarios').replaceChildren(
+      ...r.scenarios.map((sc) => {
+        const row = document.createElement('div');
+        row.className = 'scenario';
+        row.innerHTML =
+          '<div class="scenario-head"><strong></strong><span class="scenario-value"></span></div>' +
+          '<div class="div-track"><div class="div-fill"></div></div><p></p>';
+        row.querySelector('strong').textContent = sc.title;
+        const val = row.querySelector('.scenario-value');
+        val.textContent = Math.abs(sc.impact) < 0.0005 ? '± 0 %' : `${sc.impact > 0 ? '+' : ''}${pct1(sc.impact)} (${sc.amount > 0 ? '+' : ''}${eur(sc.amount)})`;
+        val.className = `scenario-value ${toneClass(sc.impact)}`;
+        const fill = row.querySelector('.div-fill');
+        const w = (Math.abs(sc.impact) / max) * 50;
+        fill.style.width = `${w}%`;
+        fill.style.left = sc.impact < 0 ? `${50 - w}%` : '50%';
+        fill.classList.add(sc.impact < 0 ? 'loss' : 'gain');
+        const drivers = sc.drivers.length ? ` Größte Verlusttreiber: ${sc.drivers.map((d) => `${d.symbol} (${pct1(d.impact)})`).join(', ')}.` : '';
+        row.querySelector('p').textContent = sc.description + drivers;
+        row.title = `${sc.title}: ${val.textContent}`;
+        return row;
+      }),
+    );
+  }
+
+  // ---------- Verbesserungsvorschläge ----------
+
+  function chip(label, before, after, fmt, betterWhenLower) {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    if (before === null || before === undefined || after === null || after === undefined) return null;
+    const better = betterWhenLower ? after < before - 1e-9 : after > before + 1e-9;
+    const worse = betterWhenLower ? after > before + 1e-9 : after < before - 1e-9;
+    el.classList.add(better ? 'better' : worse ? 'worse' : 'same');
+    el.innerHTML = '<span class="chip-label"></span> <span class="chip-values"></span><span class="chip-mark" aria-hidden="true"></span>';
+    el.querySelector('.chip-label').textContent = label;
+    el.querySelector('.chip-values').textContent = `${fmt(before)} → ${fmt(after)}`;
+    el.querySelector('.chip-mark').textContent = better ? ' ▲' : worse ? ' ▼' : '';
+    el.title = better ? 'Verbesserung' : worse ? 'Verschlechterung' : 'unverändert';
+    return el;
+  }
+
+  function renderSuggestions() {
+    const list = $('#suggestions');
+    if (!state.suggestions.length) {
+      const li = document.createElement('li');
+      li.className = 'suggestion empty';
+      li.textContent =
+        state.extraErrors.size >= Object.keys(HELPER_SYMBOLS).length
+          ? 'Für Vorschläge konnten keine Vergleichsdaten geladen werden.'
+          : 'Keine Umschichtung verbessert das Depot spürbar – es ist bereits gut aufgestellt.';
+      list.replaceChildren(li);
+      return;
+    }
+    list.replaceChildren(
+      ...state.suggestions.map((sg) => {
+        const li = document.createElement('li');
+        li.className = 'suggestion';
+        li.innerHTML =
+          '<div class="suggestion-head"><strong></strong><button type="button" class="btn small primary">Übernehmen</button></div>' +
+          '<p></p><div class="chips"></div><details><summary>Umschichtungen anzeigen</summary><ul class="changes"></ul></details>';
+        li.querySelector('strong').textContent = sg.title;
+        li.querySelector('p').textContent = sg.text;
+        li.querySelector('.chips').append(
+          ...[
+            chip('Streuung', sg.before.score, sg.after.score, (v) => String(v), false),
+            chip('Risikoklasse', sg.before.riskClass, sg.after.riskClass, (v) => String(v), true),
+            chip('Volatilität', sg.before.volatility, sg.after.volatility, pct1, true),
+            chip('Crash −30 %', sg.before.crash, sg.after.crash, pct1, false),
+          ].filter(Boolean),
+        );
+        li.querySelector('.changes').append(
+          ...sg.changes.map((c) => {
+            const item = document.createElement('li');
+            const diff = c.to - c.from;
+            item.textContent = `${c.symbol}: ${eur(c.from)} → ${eur(c.to)} (${diff > 0 ? '+' : ''}${eur(diff)})`;
+            return item;
+          }),
+        );
+        li.querySelector('button').addEventListener('click', () => applySuggestion(sg));
+        return li;
+      }),
+    );
+  }
+
+  function applySuggestion(sg) {
+    if (!confirm(`„${sg.title}“ auf das Depot „${active().name}“ anwenden? Tipp: Exportiere das Depot vorher, um den alten Stand zu sichern.`)) return;
+    for (const c of sg.changes) {
+      let pos = state.positions.find((p) => p.symbol === c.symbol);
+      if (!pos) {
+        pos = { id: newId(), symbol: c.symbol, ...stripKnown(defaultMeta(c.symbol)) };
+        state.positions.push(pos);
+      }
+      if (state.mode === 'amount') pos.amount = Math.round(c.to);
+      else {
+        const last = state.series[c.symbol]?.at(-1)?.close;
+        if (last) pos.quantity = round(c.to / last, 4);
+      }
+    }
+    save();
+    showMessage(`Vorschlag „${sg.title}“ übernommen.`, 'info');
+    refresh();
+  }
+
   // Divergierende Farbskala: −1 blau · 0 grau · +1 rot
   function corrColor(v) {
     const mid = hexToRgb(cssVar('--div-mid'));
@@ -513,6 +761,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
 
   let chart = null;
   let area = null;
+  let benchLine = null;
 
   function ensureChart() {
     if (chart) return;
@@ -526,6 +775,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       handleScroll: false,
     });
     area = chart.addAreaSeries({ lineWidth: 2, priceLineVisible: false });
+    benchLine = chart.addLineSeries({ lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: true });
   }
 
   function applyChartTheme() {
@@ -538,15 +788,20 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       timeScale: { borderColor: cssVar('--border') },
     });
     area.applyOptions({ lineColor: line, topColor: withAlpha(line, 0.25), bottomColor: withAlpha(line, 0.02) });
+    benchLine.applyOptions({ color: cssVar('--viz-2') });
   }
 
   function renderHistory(r) {
     ensureChart();
     applyChartTheme();
     area.setData(r.history.map((h) => ({ time: h.time, value: h.value })));
+    benchLine.setData(r.benchmark ? r.benchmark.history : []);
+    $('#bench-legend').textContent = r.benchmark?.name ?? 'Vergleichsindex (keine Daten)';
     chart.timeScale().fitContent();
     const extra = [
       ['Rendite 1 Jahr', pct(r.return1y), toneClass(r.return1y)],
+      [`${r.benchmark?.name ?? 'Index'} 1 Jahr`, pct(r.benchmark?.return1y), toneClass(r.benchmark?.return1y)],
+      ['Korrelation zum Index', r.benchmark?.correlation == null ? '–' : numberFmt.format(r.benchmark.correlation)],
       ['Sharpe Ratio (rf = 0)', r.sharpe === null || r.sharpe === undefined ? '–' : numberFmt.format(r.sharpe)],
       ['Schlechtester Monat', pct(r.worstMonth), 'down'],
       ['Expected Shortfall (95 %)', r.cvar95 === undefined ? '–' : pct(-r.cvar95), 'down'],
@@ -576,8 +831,16 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     if (state.result) renderCorrelation(state.result);
   });
 
+  $('#benchmark-select').addEventListener('change', (e) => {
+    state.benchmark = e.target.value;
+    save();
+    refresh();
+  });
+
   // ---------- Öffentliche Schnittstelle ----------
 
+  $('#benchmark-select').value = state.benchmark;
+  renderDepotSelect();
   renderMode();
   renderTable();
 
@@ -605,3 +868,6 @@ function hexToRgb(hex) {
   const m = hex.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
   return m ? m.slice(1).map((x) => parseInt(x, 16)) : [128, 128, 128];
 }
+
+const pct2 = (v) =>
+  v === null || v === undefined ? '–' : `${(v * 100).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} %`;

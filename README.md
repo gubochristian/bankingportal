@@ -35,6 +35,12 @@ Depot aus Aktien, ETFs, Anleihen-ETFs und Rohstoffen zusammenstellen – per Bet
   Einzelwerte auf 10 % begrenzen, Sektor-Übergewicht abbauen, Gleichgewichtung) mit Vorher-/Nachher-Vergleich
   von Streuung, Risikoklasse, Volatilität und Crash-Verlust – per Klick übernehmbar
 - **Mehrere Depots** anlegen, umbenennen, löschen sowie als JSON-Datei **exportieren und importieren**
+- **Depotvergleich:** alle Depots nebeneinander mit denselben Kennzahlen, bester Wert je Zeile markiert
+- **Umrechnung in Euro:** Kurse in USD, CHF, GBP, DKK und JPY werden täglich mit dem Wechselkurs umgerechnet –
+  das Währungsrisiko fließt so in Volatilität, Korrelationen und Drawdown ein (abschaltbar)
+- **Zukunftsprojektion & Sparplan:** Monte-Carlo-Simulation (2.000 Verläufe) mit Startkapital, monatlicher Sparrate,
+  Anlagedauer bis 40 Jahre, optionalem Sparziel und Inflationsbereinigung. Ergebnis als Fächerdiagramm mit
+  Median, 50-%- und 80-%-Band, dazu Verlustrisiko und Wahrscheinlichkeit, das Sparziel zu erreichen
 - **Hinweise** mit Einstufung (Kritisch / Warnung / Hinweis / Positiv), u. a. zu Klumpenrisiken, Sektor- und
   Regionen-Übergewichten, Home Bias, Fremdwährungsanteil, fehlendem Stabilitätsanker, hoher Korrelation und schwachem Trend
 
@@ -54,7 +60,7 @@ Voraussetzung: Node.js ≥ 18 (nur für den lokalen Webserver und die Tests).
 
 ```bash
 npm start        # startet http://localhost:8080
-npm test         # Unit-Tests für Indikatoren, Kennzahlen, Depot-Bewertung und CSV-Parser
+npm test         # Unit-Tests für Indikatoren, Depot-Bewertung, Vorschläge, Prognose, Umrechnung und Import
 ```
 
 Alternativ funktioniert jeder statische Webserver, z. B. `python3 -m http.server 8080`.
@@ -70,10 +76,11 @@ js/depot.js           Depot-Ansicht (Erfassung, Darstellung der Bewertung)
 js/portfolio.js       Depot-Bewertung: Allokation, Risiko, Benchmark, Stresstests, Kosten, Hinweise
 js/optimizer.js       Verbesserungsvorschläge durch simulierte Umschichtungen
 js/depot-file.js      Export-/Importformat für Depots
+js/forecast.js        Monte-Carlo-Simulation für die Zukunftsprojektion
 js/securities.js      Stammdaten bekannter Wertpapiere (Sektor, Region, Klasse, Währung)
 js/indicators.js      SMA, EMA, RSI, MACD, Bollinger (reine Funktionen)
 js/analysis.js        Kennzahlen und Signale
-js/market.js          Gemeinsamer Kurs-Loader mit Cache
+js/market.js          Gemeinsamer Kurs-Loader mit Cache, Wechselkurse und Euro-Umrechnung
 js/data.js            Demodaten, Twelve-Data-Anbindung, CSV-Parser
 js/util.js            Formatierung und Hilfsfunktionen
 js/vendor/            TradingView Lightweight Charts™ v4.2.3 (Apache 2.0)

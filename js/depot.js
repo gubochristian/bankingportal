@@ -1,10 +1,11 @@
 // Depot-Ansicht: Positionen erfassen, Kurse laden, Bewertung darstellen.
 
 import { createChart, CrosshairMode } from './vendor/lightweight-charts.mjs';
-import { loadSeries, MissingApiKeyError } from './market.js';
+import { loadSeries, MissingApiKeyError, convertToEur, fxSymbol, hasFx } from './market.js';
 import { analyzePortfolio, RISK_CLASS_LABELS } from './portfolio.js';
 import { suggestImprovements, HELPER_SYMBOLS } from './optimizer.js';
 import { parseDepotFile, BENCHMARK_NAMES } from './depot-file.js';
+import { simulate, expectedPortfolioReturn } from './forecast.js';
 import { ASSET_CLASSES, SECTORS, REGIONS, CURRENCIES, SECURITIES, lookupSecurity, defaultMeta } from './securities.js';
 import { $, storage, num, pct, pct1, eur, numberFmt, cssVar, withAlpha, toneClass } from './util.js';
 
@@ -47,6 +48,10 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     benchmark: active().benchmark ?? 'URTH',
     series: {}, // symbol → bars (für die aktuelle Quelle)
     errors: {}, // symbol → Fehlermeldung
+    fx: {}, // Währung → Wechselkurs-Bars (EUR/xxx)
+    convertFx: active().convertFx ?? true,
+    forecast: { monthly: 100, years: 15, inflation: false, ...(active().forecast ?? {}) },
+    input: [],
     extraErrors: new Set(), // Vergleichsindex/Bausteine ohne Kurse
     allocTab: storage.get('depotAllocTab', 'sector'),
     visible: false,
@@ -56,7 +61,13 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
   };
 
   function save() {
-    Object.assign(active(), { mode: state.mode, positions: state.positions, benchmark: state.benchmark });
+    Object.assign(active(), {
+      mode: state.mode,
+      positions: state.positions,
+      benchmark: state.benchmark,
+      convertFx: state.convertFx,
+      forecast: state.forecast,
+    });
     storage.set('depots', depots);
   }
 
@@ -74,10 +85,12 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     state.mode = d.mode ?? 'amount';
     state.positions = d.positions ?? [];
     state.benchmark = d.benchmark ?? 'URTH';
+    state.convertFx = d.convertFx ?? true;
+    state.forecast = { monthly: 100, years: 15, inflation: false, ...(d.forecast ?? {}) };
     storage.set('depots', depots);
+    syncControls();
     renderDepotSelect();
     renderMode();
-    $('#benchmark-select').value = state.benchmark;
     refresh();
   }
 
@@ -110,7 +123,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
 
   $('#depot-export').addEventListener('click', () => {
     const d = active();
-    const data = { format: 'aktienanalyse-depot', version: 1, name: d.name, mode: state.mode, benchmark: state.benchmark, positions: state.positions };
+    const data = { format: 'aktienanalyse-depot', version: 1, name: d.name, mode: state.mode, benchmark: state.benchmark, convertFx: state.convertFx, forecast: state.forecast, positions: state.positions };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = Object.assign(document.createElement('a'), {
       href: URL.createObjectURL(blob),
@@ -128,8 +141,8 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     try {
       const data = parseDepotFile(await file.text());
       if (depots.list.some((d) => d.name === data.name)) data.name = `${data.name} (Import)`;
+      state.notice = `Depot „${data.name}“ mit ${data.positions.length} Positionen importiert.`;
       createDepot(data.name, data);
-      showMessage(`Depot „${data.name}“ mit ${data.positions.length} Positionen importiert.`, 'info');
     } catch (err) {
       showMessage(`Import fehlgeschlagen: ${err.message}`);
     }
@@ -160,7 +173,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     // Beim Wechsel die Positionen sinnvoll umrechnen (über den aktuellen Kurs)
     const toShares = btn.dataset.mode === 'shares';
     for (const p of state.positions) {
-      const last = state.series[p.symbol]?.at(-1)?.close;
+      const last = barsFor(p.symbol, p.currency)?.at(-1)?.close;
       if (!last) continue;
       if (toShares && p.amount) p.quantity = round(p.amount / last, 4);
       if (!toShares && p.quantity) p.amount = Math.round(p.quantity * last);
@@ -316,7 +329,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
           ),
           td(numberInput(p[qtyField], (x) => update(p, qtyField, x), `${state.mode === 'amount' ? 'Betrag' : 'Stückzahl'} ${p.symbol}`), 'num'),
           td(numberInput(p.buyPrice, (x) => update(p, 'buyPrice', x), `Kaufkurs ${p.symbol}`), 'num shares-only'),
-          td(v.last ? num(v.last) : '…', 'num'),
+          td(priceCell(p, v), 'num'),
           td(v.value !== null ? eur(v.value) : '–', 'num'),
           td(v.value && total ? pct1(v.value / total) : '–', 'num'),
           td(pnl === null ? '–' : `${eur(pnl)} (${pct(pnl / v.costBasis)})`, `num shares-only ${toneClass(pnl)}`),
@@ -329,20 +342,34 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     $('#positions-table').hidden = state.positions.length === 0;
   }
 
+  // Kurs in Handelswährung, bei Umrechnung zusätzlich in Euro
+  function priceCell(p, v) {
+    if (v.rawLast === null) return state.errors[p.symbol] ? '–' : '…';
+    if (p.currency === 'EUR') return num(v.rawLast);
+    const el = document.createElement('div');
+    el.className = 'price-cell';
+    el.append(Object.assign(document.createElement('span'), { textContent: `${num(v.rawLast)} ${p.currency}` }));
+    if (state.convertFx && state.fx[p.currency]) {
+      el.append(Object.assign(document.createElement('span'), { className: 'muted small', textContent: `= ${num(v.last)} €` }));
+    }
+    return el;
+  }
+
   // TER: eigener Wert der Position, sonst Richtwert aus den Stammdaten
   function terOf(p) {
     if (p.type === 'Aktie') return 0;
     return p.ter === undefined ? (lookupSecurity(p.symbol)?.ter ?? null) : p.ter;
   }
 
-  // Aktueller Wert jeder Position aus Menge bzw. Betrag und letztem Kurs
-  function positionValues() {
-    return state.positions.map((p) => {
-      const last = state.series[p.symbol]?.at(-1)?.close ?? null;
-      if (state.mode === 'amount') return { id: p.id, last, value: p.amount > 0 ? p.amount : null, costBasis: null };
+  // Aktueller Wert jeder Position aus Menge bzw. Betrag und letztem Kurs (in Euro)
+  function positionValues(positions = state.positions, mode = state.mode, bars = barsFor) {
+    return positions.map((p) => {
+      const last = bars(p.symbol, p.currency)?.at(-1)?.close ?? null;
+      const rawLast = state.series[p.symbol]?.at(-1)?.close ?? null;
+      if (mode === 'amount') return { id: p.id, last, rawLast, value: p.amount > 0 ? p.amount : null, costBasis: null };
       const value = last !== null && p.quantity > 0 ? p.quantity * last : null;
       const costBasis = p.buyPrice > 0 && p.quantity > 0 ? p.buyPrice * p.quantity : null;
-      return { id: p.id, last, value, costBasis };
+      return { id: p.id, last, rawLast, value, costBasis };
     });
   }
 
@@ -356,6 +383,57 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
   }
 
   let loadedSource = null;
+  const eurCache = new Map();
+
+  // Kurse in Euro (falls Umrechnung aktiv und Wechselkurs geladen), sonst Originalkurse
+  function barsFor(symbol, currency, convert = state.convertFx) {
+    const raw = state.series[symbol];
+    if (!raw || !convert || currency === 'EUR' || !state.fx[currency]) return raw ?? null;
+    const key = `${symbol}|${currency}`;
+    if (!eurCache.has(key)) eurCache.set(key, convertToEur(raw, state.fx[currency]));
+    return eurCache.get(key);
+  }
+
+  const currencyOf = (symbol) => state.positions.find((p) => p.symbol === symbol)?.currency ?? lookupSecurity(symbol)?.currency ?? 'USD';
+
+  // Lädt fehlende Kursreihen nacheinander. Gibt false zurück, wenn abgebrochen wurde.
+  async function loadMissing(symbols, { token, label, critical }) {
+    const source = getSource();
+    const todo = [...new Set(symbols)].filter((s) => !state.series[s] && !state.errors[s] && !state.extraErrors.has(s));
+    for (const [i, symbol] of todo.entries()) {
+      if (source === 'twelvedata') showMessage(`${label} … (${i + 1}/${todo.length}: ${symbol})`, 'info');
+      try {
+        const { bars } = await loadSeries(symbol, {
+          source,
+          apiKey: getApiKey(),
+          onWait: (sec) => showMessage(`API-Limit des kostenlosen Tarifs erreicht – weiter in ${sec} Sekunden …`, 'info'),
+        });
+        if (token !== state.loadToken) return false;
+        state.series[symbol] = bars;
+      } catch (err) {
+        if (token !== state.loadToken) return false;
+        if (err instanceof MissingApiKeyError) {
+          showMessage(err.message, 'info');
+          openSettings();
+          return false;
+        }
+        if (critical) state.errors[symbol] = `Keine Kurse: ${err.message}`;
+        else state.extraErrors.add(symbol);
+      }
+    }
+    return true;
+  }
+
+  // Wechselkurse für alle benötigten Fremdwährungen
+  async function loadFx(currencies, token) {
+    const needed = [...new Set(currencies)].filter((c) => c !== 'EUR' && hasFx(c) && !state.fx[c]);
+    if (!(await loadMissing(needed.map(fxSymbol), { token, label: 'Lade Wechselkurse', critical: false }))) return false;
+    for (const c of needed) if (state.series[fxSymbol(c)]) state.fx[c] = state.series[fxSymbol(c)];
+    eurCache.clear();
+    return true;
+  }
+
+  const extraSymbols = (benchmark) => [benchmark, ...Object.values(HELPER_SYMBOLS)];
 
   async function refresh() {
     const token = ++state.loadToken;
@@ -364,53 +442,34 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       state.series = {};
       state.errors = {};
       state.extraErrors = new Set();
+      state.fx = {};
+      eurCache.clear();
       loadedSource = source;
     }
     renderTable();
-    const missing = [...new Set(state.positions.map((p) => p.symbol))].filter((s) => !state.series[s] && !state.errors[s]);
     showMessage('');
 
-    for (const [i, symbol] of missing.entries()) {
-      if (source === 'twelvedata') showMessage(`Lade Kurse … (${i + 1}/${missing.length}: ${symbol})`, 'info');
-      try {
-        const { bars } = await loadSeries(symbol, {
-          source,
-          apiKey: getApiKey(),
-          onWait: (s) => showMessage(`API-Limit des kostenlosen Tarifs erreicht – weiter in ${s} Sekunden …`, 'info'),
-        });
-        if (token !== state.loadToken) return;
-        state.series[symbol] = bars;
-      } catch (err) {
-        if (token !== state.loadToken) return;
-        if (err instanceof MissingApiKeyError) {
-          showMessage(err.message, 'info');
-          openSettings();
-          return;
-        }
-        state.errors[symbol] = `Keine Kurse: ${err.message}`;
-      }
+    if (!(await loadMissing(state.positions.map((p) => p.symbol), { token, label: 'Lade Kurse', critical: true }))) return;
+    // Vergleichsindex und Bausteine für Vorschläge (Fehler hier sind nicht kritisch)
+    if (!(await loadMissing(extraSymbols(state.benchmark), { token, label: 'Lade Vergleichsdaten', critical: false }))) return;
+    if (state.convertFx) {
+      const currencies = [...state.positions.map((p) => p.currency), ...extraSymbols(state.benchmark).map(currencyOf)];
+      if (!(await loadFx(currencies, token))) return;
     }
     if (token !== state.loadToken) return;
 
-    // Vergleichsindex und Bausteine für Vorschläge (Fehler hier sind nicht kritisch)
-    const extras = [state.benchmark, ...Object.values(HELPER_SYMBOLS)].filter((s) => !state.series[s] && !state.extraErrors.has(s));
-    for (const symbol of [...new Set(extras)]) {
-      if (source === 'twelvedata') showMessage(`Lade Vergleichsdaten … (${symbol})`, 'info');
-      try {
-        const { bars } = await loadSeries(symbol, { source, apiKey: getApiKey(), onWait: (s) => showMessage(`API-Limit erreicht – weiter in ${s} Sekunden …`, 'info') });
-        if (token !== state.loadToken) return;
-        state.series[symbol] = bars;
-      } catch {
-        if (token !== state.loadToken) return;
-        state.extraErrors.add(symbol);
-      }
+    const missingFx = state.convertFx
+      ? [...new Set(state.positions.map((p) => p.currency))].filter((c) => c !== 'EUR' && !state.fx[c])
+      : [];
+    const notes = [];
+    if (Object.keys(state.errors).length) {
+      notes.push(`Für ${Object.keys(state.errors).join(', ')} konnten keine Kurse geladen werden – diese Positionen fließen nicht in die Bewertung ein.`);
     }
-    if (token !== state.loadToken) return;
-    showMessage(
-      Object.keys(state.errors).length
-        ? `Für ${Object.keys(state.errors).join(', ')} konnten keine Kurse geladen werden – diese Positionen fließen nicht in die Bewertung ein.`
-        : '',
-    );
+    if (missingFx.length) notes.push(`Kein Wechselkurs für ${missingFx.join(', ')} – diese Werte werden nicht umgerechnet.`);
+    // Bestätigungen (z. B. nach Import) erst nach dem Laden anzeigen, damit sie nicht überschrieben werden
+    if (!notes.length && state.notice) notes.push(state.notice);
+    state.notice = null;
+    showMessage(notes.join(' '), Object.keys(state.errors).length ? 'error' : 'info');
     renderTable();
     evaluate();
   }
@@ -434,17 +493,39 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
   // Stammdaten für Bausteine, die ein Vorschlag neu ins Depot bringt
   const makeMeta = (symbol) => toInput({ symbol, ...stripKnown(defaultMeta(symbol)) }, 0);
 
-  function evaluate() {
-    const values = positionValues();
-    const input = state.positions
+  // Bewertet ein beliebiges Depot (aktuelles oder eines aus dem Vergleich)
+  function analyzeDepot({ positions, mode, benchmark, convertFx }) {
+    const convert = convertFx !== false;
+    const bars = (symbol, currency) => barsFor(symbol, currency, convert);
+    const values = positionValues(positions, mode, bars);
+    const input = positions
       .map((p, i) => ({ p, v: values[i] }))
-      .filter(({ p, v }) => v.value > 0 && state.series[p.symbol])
+      .filter(({ p, v }) => v.value > 0 && bars(p.symbol, p.currency))
       .map(({ p, v }) => toInput(p, v.value, v.costBasis));
-    const bmBars = state.series[state.benchmark];
-    const benchmark = bmBars ? { symbol: state.benchmark, name: BENCHMARK_NAMES[state.benchmark] ?? state.benchmark, bars: bmBars } : null;
-    state.result = input.length ? analyzePortfolio(input, state.series, { benchmark }) : null;
-    state.suggestions = state.result ? suggestImprovements(input, state.series, state.result, { benchmark, makeMeta }) : [];
+    const series = Object.fromEntries(input.map((p) => [p.symbol, bars(p.symbol, p.currency)]));
+    for (const sym of extraSymbols(benchmark)) {
+      if (!series[sym]) {
+        const b = bars(sym, lookupSecurity(sym)?.currency ?? 'USD');
+        if (b) series[sym] = b;
+      }
+    }
+    const bm = series[benchmark] ? { symbol: benchmark, name: BENCHMARK_NAMES[benchmark] ?? benchmark, bars: series[benchmark] } : null;
+    const result = input.length ? analyzePortfolio(input, series, { benchmark: bm }) : null;
+    return { input, series, benchmark: bm, result };
+  }
+
+  function evaluate() {
+    const { input, series, benchmark, result } = analyzeDepot({
+      positions: state.positions,
+      mode: state.mode,
+      benchmark: state.benchmark,
+      convertFx: state.convertFx,
+    });
+    state.input = input;
+    state.result = result;
+    state.suggestions = result ? suggestImprovements(input, series, result, { benchmark, makeMeta }) : [];
     renderResults();
+    renderForecast();
   }
 
   // ---------- Ergebnisse ----------
@@ -697,12 +778,12 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       }
       if (state.mode === 'amount') pos.amount = Math.round(c.to);
       else {
-        const last = state.series[c.symbol]?.at(-1)?.close;
+        const last = barsFor(c.symbol, pos.currency)?.at(-1)?.close;
         if (last) pos.quantity = round(c.to / last, 4);
       }
     }
     save();
-    showMessage(`Vorschlag „${sg.title}“ übernommen.`, 'info');
+    state.notice = `Vorschlag „${sg.title}“ übernommen.`;
     refresh();
   }
 
@@ -837,9 +918,308 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     refresh();
   });
 
+  // ---------- Steuerelemente ----------
+
+  function syncControls() {
+    $('#benchmark-select').value = state.benchmark;
+    $('#depot-fx').checked = state.convertFx;
+    $('#fx-note').textContent = state.convertFx
+      ? 'Kurse in Fremdwährung werden mit dem Wechselkurs in Euro umgerechnet.'
+      : 'Währungen werden nicht umgerechnet – alle Kurse werden als Euro-Beträge behandelt.';
+    const f = state.forecast;
+    $('#fc-start').value = f.start ?? '';
+    $('#fc-monthly').value = f.monthly ?? '';
+    $('#fc-years').value = f.years;
+    $('#fc-years-out').textContent = `${f.years} Jahre`;
+    $('#fc-return').value = f.expectedReturn ?? '';
+    $('#fc-vol').value = f.volatility ?? '';
+    $('#fc-goal').value = f.goal ?? '';
+    $('#fc-inflation').checked = !!f.inflation;
+  }
+
+  $('#depot-fx').addEventListener('change', (e) => {
+    state.convertFx = e.target.checked;
+    save();
+    syncControls();
+    refresh();
+  });
+
+  // ---------- Zukunftsprojektion ----------
+
+  const optNum = (el) => (el.value === '' ? null : Number(el.value));
+
+  $('#forecast-form').addEventListener('input', () => {
+    state.forecast = {
+      start: optNum($('#fc-start')),
+      monthly: optNum($('#fc-monthly')) ?? 0,
+      years: Number($('#fc-years').value),
+      expectedReturn: optNum($('#fc-return')),
+      volatility: optNum($('#fc-vol')),
+      goal: optNum($('#fc-goal')),
+      inflation: $('#fc-inflation').checked,
+    };
+    $('#fc-years-out').textContent = `${state.forecast.years} Jahre`;
+    save();
+    scheduleForecast();
+  });
+  $('#forecast-form').addEventListener('submit', (e) => e.preventDefault());
+
+  let forecastTimer = null;
+  function scheduleForecast() {
+    clearTimeout(forecastTimer);
+    forecastTimer = setTimeout(renderForecast, 120);
+  }
+
+  function renderForecast() {
+    const r = state.result;
+    if (!r) return;
+    const f = state.forecast;
+    const derivedReturn = expectedPortfolioReturn(state.input);
+    const derivedVol = r.volatility ?? 0.15;
+    $('#fc-start').placeholder = Math.round(r.totalValue);
+    $('#fc-return').placeholder = (derivedReturn * 100).toFixed(1);
+    $('#fc-vol').placeholder = (derivedVol * 100).toFixed(1);
+
+    const params = {
+      startValue: f.start ?? r.totalValue,
+      monthly: f.monthly ?? 0,
+      years: f.years,
+      expectedReturn: f.expectedReturn !== null && f.expectedReturn !== undefined ? f.expectedReturn / 100 : derivedReturn,
+      volatility: f.volatility !== null && f.volatility !== undefined ? f.volatility / 100 : derivedVol,
+      inflation: f.inflation ? 0.02 : 0,
+      goal: f.goal,
+    };
+    const sim = simulate(params);
+    state.forecastResult = sim;
+
+    $('#fc-assumption').textContent =
+      `Annahmen: ${pct1(params.expectedReturn)} Rendite und ${pct1(params.volatility)} Volatilität pro Jahr` +
+      (f.expectedReturn == null ? ' (Rendite aus Richtwerten je Anlageklasse abzüglich Kosten' : ' (Rendite manuell') +
+      (f.volatility == null ? ', Volatilität aus den letzten 12 Monaten).' : ', Volatilität manuell).') +
+      (params.inflation ? ' Werte in heutiger Kaufkraft.' : '');
+
+    const tiles = [
+      ['Eingezahlt', eur(sim.paidIn), `Start ${eur(params.startValue)} + ${eur(params.monthly)} × ${params.years * 12} Monate`],
+      ['Wahrscheinlicher Wert (Median)', eur(sim.median), `${sim.median >= sim.paidIn ? '+' : ''}${eur(sim.median - sim.paidIn)} ggü. Einzahlungen`],
+      ['Ungünstig (10 %)', eur(sim.pessimistic), '9 von 10 Verläufen lagen darüber'],
+      ['Günstig (90 %)', eur(sim.optimistic), '1 von 10 Verläufen lag darüber'],
+      ['Verlustrisiko', pct1(sim.probLoss), params.inflation ? 'Endwert unter Einzahlungen (Kaufkraft)' : 'Endwert unter Einzahlungen'],
+    ];
+    if (sim.probGoal !== null) tiles.push(['Sparziel erreicht', pct1(sim.probGoal), `in ${params.years} Jahren mindestens ${eur(params.goal)}`]);
+    $('#fc-kpis').replaceChildren(
+      ...tiles.map(([label, value, sub]) => {
+        const div = document.createElement('div');
+        div.className = 'fc-kpi';
+        div.append(
+          Object.assign(document.createElement('div'), { className: 'kpi-label', textContent: label }),
+          Object.assign(document.createElement('div'), { className: 'fc-value', textContent: value }),
+          Object.assign(document.createElement('div'), { className: 'kpi-sub', textContent: sub }),
+        );
+        return div;
+      }),
+    );
+    drawFan(sim, params.goal);
+    renderForecastTable(sim);
+  }
+
+  function renderForecastTable(sim) {
+    const step = sim.bands.length > 21 ? 5 : sim.bands.length > 11 ? 2 : 1;
+    const rows = sim.bands.filter((b) => b.year % step === 0 || b.year === sim.bands.length - 1);
+    const table = $('#fc-table');
+    table.innerHTML = '<thead><tr><th>Jahr</th><th class="num">Eingezahlt</th><th class="num">Ungünstig (10 %)</th><th class="num">Median</th><th class="num">Günstig (90 %)</th></tr></thead><tbody></tbody>';
+    table.tBodies[0].append(
+      ...rows.map((b) => {
+        const tr = document.createElement('tr');
+        for (const [v, cls] of [[String(b.year)], [eur(b.paidIn), 'num'], [eur(b.p10), 'num'], [eur(b.p50), 'num'], [eur(b.p90), 'num']]) {
+          tr.append(Object.assign(document.createElement('td'), { textContent: v, className: cls ?? '' }));
+        }
+        return tr;
+      }),
+    );
+  }
+
+  // Fächerdiagramm als SVG: Bänder 10–90 % und 25–75 %, Median, Einzahlungen
+  const SVG = 'http://www.w3.org/2000/svg';
+  const svgEl = (tag, attrs = {}) => {
+    const el = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  };
+  const compactEur = new Intl.NumberFormat('de-DE', { notation: 'compact', maximumFractionDigits: 1, style: 'currency', currency: 'EUR' });
+
+  function niceMax(v) {
+    const pow = 10 ** Math.floor(Math.log10(v));
+    return [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map((m) => m * pow).find((m) => m >= v) ?? 10 * pow;
+  }
+
+  function drawFan(sim, goal) {
+    const box = $('#fan-chart');
+    const width = Math.max(300, box.clientWidth || 800);
+    const height = 300;
+    const m = { top: 12, right: 16, bottom: 28, left: 64 };
+    const w = width - m.left - m.right;
+    const h = height - m.top - m.bottom;
+    const n = sim.bands.length - 1;
+    const yMax = niceMax(Math.max(sim.bands[n].p90, goal ?? 0, sim.paidIn) * 1.02);
+    const x = (year) => m.left + (year / n) * w;
+    const y = (v) => m.top + h - (Math.max(0, v) / yMax) * h;
+
+    const svg = svgEl('svg', { width, height, viewBox: `0 0 ${width} ${height}` });
+    // Raster und Achsen
+    for (let i = 0; i <= 4; i++) {
+      const v = (yMax / 4) * i;
+      svg.append(svgEl('line', { x1: m.left, x2: width - m.right, y1: y(v), y2: y(v), class: 'fan-grid' }));
+      const t = svgEl('text', { x: m.left - 8, y: y(v) + 4, class: 'fan-axis', 'text-anchor': 'end' });
+      t.textContent = compactEur.format(v);
+      svg.append(t);
+    }
+    // so viele Jahresmarken, wie Platz ist (mind. ~56 px pro Beschriftung)
+    const xStep = [1, 2, 5, 10].find((st) => (n / st) * 56 <= w) ?? 10;
+    for (let yr = 0; yr <= n; yr += xStep) {
+      const t = svgEl('text', { x: x(yr), y: height - 8, class: 'fan-axis', 'text-anchor': 'middle' });
+      t.textContent = yr === 0 ? 'heute' : `${yr} J.`;
+      svg.append(t);
+    }
+
+    const area = (hiKey, loKey) =>
+      sim.bands.map((b, i) => `${i ? 'L' : 'M'}${x(b.year)},${y(b[hiKey])}`).join('') +
+      [...sim.bands].reverse().map((b) => `L${x(b.year)},${y(b[loKey])}`).join('') + 'Z';
+    const line = (key) => sim.bands.map((b, i) => `${i ? 'L' : 'M'}${x(b.year)},${y(b[key])}`).join('');
+
+    svg.append(svgEl('path', { d: area('p90', 'p10'), class: 'fan-outer' }));
+    svg.append(svgEl('path', { d: area('p75', 'p25'), class: 'fan-inner' }));
+    svg.append(svgEl('path', { d: line('paidIn'), class: 'fan-paid' }));
+    svg.append(svgEl('path', { d: line('p50'), class: 'fan-median' }));
+    if (goal > 0 && goal <= yMax) {
+      svg.append(svgEl('line', { x1: m.left, x2: width - m.right, y1: y(goal), y2: y(goal), class: 'fan-goal' }));
+      const t = svgEl('text', { x: width - m.right - 4, y: y(goal) - 6, class: 'fan-axis fan-goal-label', 'text-anchor': 'end' });
+      t.textContent = `Sparziel ${compactEur.format(goal)}`;
+      svg.append(t);
+    }
+
+    // Hover: Linie, Punkte und Tooltip für das nächstgelegene Jahr
+    const cursor = svgEl('line', { y1: m.top, y2: m.top + h, class: 'fan-cursor', visibility: 'hidden' });
+    const dot = svgEl('circle', { r: 5, class: 'fan-dot', visibility: 'hidden' });
+    svg.append(cursor, dot);
+    const hit = svgEl('rect', { x: m.left, y: m.top, width: w, height: h, fill: 'transparent' });
+    svg.append(hit);
+
+    const tip = document.createElement('div');
+    tip.className = 'fan-tip';
+    tip.hidden = true;
+    const move = (evt) => {
+      const rect = svg.getBoundingClientRect();
+      const px = evt.clientX - rect.left;
+      const yr = Math.max(0, Math.min(n, Math.round(((px - m.left) / w) * n)));
+      const b = sim.bands[yr];
+      cursor.setAttribute('x1', x(yr));
+      cursor.setAttribute('x2', x(yr));
+      dot.setAttribute('cx', x(yr));
+      dot.setAttribute('cy', y(b.p50));
+      cursor.setAttribute('visibility', 'visible');
+      dot.setAttribute('visibility', 'visible');
+      tip.hidden = false;
+      tip.innerHTML = '';
+      tip.append(Object.assign(document.createElement('strong'), { textContent: yr === 0 ? 'Heute' : `Nach ${yr} ${yr === 1 ? 'Jahr' : 'Jahren'}` }));
+      for (const [label, v] of [['Günstig (90 %)', b.p90], ['Median', b.p50], ['Ungünstig (10 %)', b.p10], ['Eingezahlt', b.paidIn]]) {
+        const row = document.createElement('div');
+        row.append(Object.assign(document.createElement('span'), { textContent: label }), Object.assign(document.createElement('span'), { textContent: eur(v) }));
+        tip.append(row);
+      }
+      const left = x(yr) + 12 + 220 > width ? x(yr) - 12 - 220 : x(yr) + 12;
+      tip.style.left = `${left}px`;
+      tip.style.top = `${m.top}px`;
+    };
+    const leave = () => {
+      cursor.setAttribute('visibility', 'hidden');
+      dot.setAttribute('visibility', 'hidden');
+      tip.hidden = true;
+    };
+    hit.addEventListener('pointermove', move);
+    hit.addEventListener('pointerleave', leave);
+    box.replaceChildren(svg, tip);
+  }
+
+  // Bei Größenänderung neu zeichnen
+  let lastFanWidth = 0;
+  new ResizeObserver(() => {
+    const wNow = $('#fan-chart').clientWidth;
+    if (state.forecastResult && wNow && Math.abs(wNow - lastFanWidth) > 4) {
+      lastFanWidth = wNow;
+      drawFan(state.forecastResult, state.forecast.goal);
+    }
+  }).observe($('#fan-chart'));
+
+  // ---------- Depotvergleich ----------
+
+  async function runComparison() {
+    const card = $('#compare-card');
+    card.hidden = false;
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const table = $('#compare-table');
+    table.innerHTML = '<tbody><tr><td class="muted">Lade Kurse für alle Depots …</td></tr></tbody>';
+    const token = state.loadToken;
+    const all = depots.list.map((d) => (d.id === depots.activeId ? { ...d, ...active(), positions: state.positions, mode: state.mode } : d));
+    const symbols = all.flatMap((d) => (d.positions ?? []).map((p) => p.symbol));
+    if (!(await loadMissing(symbols, { token, label: 'Lade Kurse für den Vergleich', critical: false }))) return;
+    const currencies = all.flatMap((d) => (d.positions ?? []).map((p) => p.currency));
+    if (!(await loadFx(currencies, token))) return;
+    showMessage('');
+
+    const rows = all.map((d) => ({
+      depot: d,
+      result: analyzeDepot({ positions: d.positions ?? [], mode: d.mode ?? 'amount', benchmark: state.benchmark, convertFx: d.convertFx }).result,
+    }));
+    const metrics = [
+      ['Depotwert', (r) => r.totalValue, eur, null],
+      ['Positionen', (r) => r.concentration.count, String, null],
+      ['Risikoklasse', (r) => r.riskClass, (v) => `${v} / 7`, 'low'],
+      ['Streuungs-Score', (r) => r.score.total, (v) => `${v} / 100`, 'high'],
+      ['Volatilität p. a.', (r) => r.volatility, pct1, 'low'],
+      ['Max. Drawdown', (r) => r.maxDrawdown, pct1, 'high'],
+      ['Crash-Szenario (−30 %)', (r) => r.scenarios.find((x) => x.key === 'crash')?.impact, pct1, 'high'],
+      [`Beta zum ${BENCHMARK_NAMES[state.benchmark]}`, (r) => r.benchmark?.beta, (v) => numberFmt.format(v), null],
+      ['Rendite 1 Jahr', (r) => r.return1y, pct, 'high'],
+      ['Sharpe Ratio', (r) => r.sharpe, (v) => numberFmt.format(v), 'high'],
+      ['Laufende Kosten', (r) => r.costs.weightedTer, pct2, 'low'],
+      ['Kritische Hinweise', (r) => r.hints.filter((x) => x.level === 'critical').length, String, 'low'],
+    ];
+    const head = document.createElement('tr');
+    head.append(Object.assign(document.createElement('th'), { textContent: 'Kennzahl' }));
+    for (const { depot } of rows) {
+      const th = Object.assign(document.createElement('th'), { className: 'num', textContent: depot.name, scope: 'col' });
+      if (depot.id === depots.activeId) th.classList.add('current');
+      head.append(th);
+    }
+    const body = metrics.map(([label, get, fmt, better]) => {
+      const tr = document.createElement('tr');
+      tr.append(Object.assign(document.createElement('th'), { textContent: label, scope: 'row' }));
+      const vals = rows.map(({ result }) => (result ? get(result) : null));
+      const valid = vals.filter((v) => v !== null && v !== undefined && Number.isFinite(v));
+      const best = better && valid.length > 1 ? (better === 'low' ? Math.min(...valid) : Math.max(...valid)) : null;
+      vals.forEach((v) => {
+        const td = Object.assign(document.createElement('td'), { className: 'num' });
+        td.textContent = v === null || v === undefined || !Number.isFinite(v) ? '–' : fmt(v);
+        if (best !== null && v === best && valid.filter((x) => x === best).length < valid.length) {
+          td.classList.add('best');
+          td.textContent += ' ▲';
+          td.title = 'günstigster Wert';
+        }
+        tr.append(td);
+      });
+      return tr;
+    });
+    table.replaceChildren(document.createElement('thead'), document.createElement('tbody'));
+    table.tHead.append(head);
+    table.tBodies[0].append(...body);
+  }
+
+  $('#depot-compare-btn').addEventListener('click', runComparison);
+  $('#compare-close').addEventListener('click', () => ($('#compare-card').hidden = true));
+
   // ---------- Öffentliche Schnittstelle ----------
 
-  $('#benchmark-select').value = state.benchmark;
+  syncControls();
   renderDepotSelect();
   renderMode();
   renderTable();

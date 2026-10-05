@@ -49,6 +49,7 @@ function marketReturn(date) {
 // Dadurch sind Aktien untereinander realistisch korreliert (stärker innerhalb
 // eines Sektors), und Anleihen/Gold verhalten sich anders als Aktien.
 // Gleiches Symbol ergibt immer dieselbe Kurve.
+// `profile` (optional): beta, idio, etf, alpha (tägliche Zusatzrendite), start (Startkurs), decimals
 export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date(), profile } = {}) {
   const sym = symbol.toUpperCase();
   const known = lookupSecurity(sym);
@@ -57,7 +58,8 @@ export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date(),
   const beta = p.beta ?? 0.6 + rand() * 0.9;
   const idio = p.idio ?? 0.007 + rand() * 0.008;
   const sector = p.etf ? null : known?.sector ?? `Sektor ${hashString(sym) % 6}`;
-  const alpha = (rand() - 0.5) * 0.0008;
+  const alphaRand = rand();
+  const alpha = p.alpha ?? (alphaRand - 0.5) * 0.0008;
 
   const dates = [];
   const d = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate()));
@@ -67,8 +69,11 @@ export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date(),
     d.setUTCDate(d.getUTCDate() - 1);
   }
 
-  let price = 20 + rand() * 280;
-  const baseVolume = 1e6 * (1 + rand() * 20);
+  const startRand = rand();
+  let price = p.start ?? 20 + startRand * 280;
+  const baseVolume = p.start ? 0 : 1e6 * (1 + rand() * 20);
+  const digits = p.decimals ?? 2;
+  const round = (v) => Math.round(v * 10 ** digits) / 10 ** digits;
   const bars = [];
 
   for (const date of dates) {
@@ -86,9 +91,6 @@ export function generateDemoBars(symbol, { days = 3 * 252, endDate = new Date(),
   return bars;
 }
 
-function round(v) {
-  return Math.round(v * 100) / 100;
-}
 
 // ---------- Twelve Data ----------
 

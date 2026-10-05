@@ -44,6 +44,23 @@ export function parseDepotFile(text) {
     name: str(data.name) || 'Importiertes Depot',
     mode: data.mode === 'shares' ? 'shares' : 'amount',
     benchmark: Object.keys(BENCHMARK_NAMES).includes(data.benchmark) ? data.benchmark : 'URTH',
+    convertFx: data.convertFx !== false,
+    forecast: parseForecast(data.forecast),
     positions,
+  };
+}
+
+// Prognose-Einstellungen: nur endliche Zahlen in sinnvollen Grenzen übernehmen
+function parseForecast(f) {
+  if (!f || typeof f !== 'object') return undefined;
+  const n = (v, min, max) => (typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max ? v : null);
+  return {
+    start: n(f.start, 0, 1e10),
+    monthly: n(f.monthly, 0, 1e8) ?? 0,
+    years: Math.round(n(f.years, 1, 40) ?? 15),
+    expectedReturn: n(f.expectedReturn, -10, 20),
+    volatility: n(f.volatility, 0, 100),
+    goal: n(f.goal, 0, 1e12),
+    inflation: f.inflation === true,
   };
 }

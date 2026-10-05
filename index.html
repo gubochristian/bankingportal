@@ -138,6 +138,7 @@
             <button type="button" class="btn small" id="depot-delete">Löschen</button>
             <button type="button" class="btn small" id="depot-export" title="Depot als JSON-Datei speichern">Exportieren</button>
             <button type="button" class="btn small" id="depot-import" title="Depot aus JSON-Datei laden">Importieren</button>
+            <button type="button" class="btn small" id="depot-compare-btn" title="Kennzahlen aller Depots nebeneinander">Depots vergleichen</button>
             <input type="file" id="depot-import-file" accept=".json,application/json" hidden />
           </div>
         </div>
@@ -158,6 +159,9 @@
                 <option value="dax">Nur deutsche Einzelwerte</option>
               </select>
             </label>
+            <label class="check" title="Kurse in Fremdwährung mit dem jeweiligen Wechselkurs in Euro umrechnen">
+              <input type="checkbox" id="depot-fx" /> In Euro umrechnen
+            </label>
             <button type="button" class="btn" id="depot-clear">Leeren</button>
           </div>
         </div>
@@ -172,7 +176,7 @@
             <input id="depot-qty" type="number" min="0" step="any" required inputmode="decimal" />
           </label>
           <label class="field shares-only">
-            <span>Kaufkurs (optional)</span>
+            <span>Kaufkurs in € (optional)</span>
             <input id="depot-buy" type="number" min="0" step="any" inputmode="decimal" />
           </label>
           <button type="submit" class="btn primary">Hinzufügen</button>
@@ -190,7 +194,7 @@
                 <th>Währung</th>
                 <th class="num" title="Laufende Kosten pro Jahr (Total Expense Ratio)">TER %</th>
                 <th class="num" id="qty-head">Betrag</th>
-                <th class="num shares-only">Kaufkurs</th>
+                <th class="num shares-only">Kaufkurs €</th>
                 <th class="num">Kurs</th>
                 <th class="num">Wert</th>
                 <th class="num">Gewicht</th>
@@ -204,11 +208,24 @@
         <p class="muted small" id="depot-empty">Noch keine Positionen. Füge Werte hinzu oder lade ein Beispieldepot.</p>
         <p class="muted small no-margin">
           Sektor, Region und Anlageklasse sind für bekannte Werte vorbelegt und lassen sich pro Position anpassen.
-          Währungen werden nicht umgerechnet – alle Werte werden als Euro-Beträge behandelt. TER-Werte bekannter ETFs sind Richtwerte.
+          <span id="fx-note"></span> TER-Werte bekannter ETFs sind Richtwerte.
         </p>
       </section>
 
       <div id="depot-message" class="message" role="status" hidden></div>
+
+      <section class="card" id="compare-card" hidden>
+        <div class="card-head wrap">
+          <div>
+            <h2>Depotvergleich</h2>
+            <span class="muted small">Alle gespeicherten Depots, bewertet mit derselben Methodik und demselben Vergleichsindex</span>
+          </div>
+          <button type="button" class="btn small" id="compare-close">Schließen</button>
+        </div>
+        <div class="table-wrap"><table class="compare-table" id="compare-table"></table></div>
+        <p class="muted small no-margin">▲ markiert pro Zeile den günstigsten Wert.</p>
+      </section>
+
 
       <div id="depot-results" hidden>
         <section class="kpis" aria-label="Kennzahlen des Depots">
@@ -361,6 +378,58 @@
           <dl class="stats compact" id="depot-extra"></dl>
         </section>
 
+
+        <section class="card" id="forecast-card">
+          <div class="card-head wrap">
+            <div>
+              <h2>Zukunftsprojektion &amp; Sparplan</h2>
+              <span class="muted small">Monte-Carlo-Simulation mit 2.000 möglichen Verläufen</span>
+            </div>
+            <div class="legend">
+              <span><i class="key key-band-outer"></i>80 % der Verläufe</span>
+              <span><i class="key key-band-inner"></i>50 %</span>
+              <span><i class="key key-1"></i>Median</span>
+              <span><i class="key key-paid"></i>Eingezahlt</span>
+            </div>
+          </div>
+          <form class="forecast-inputs" id="forecast-form" autocomplete="off">
+            <label class="field">
+              <span>Startkapital €</span>
+              <input type="number" id="fc-start" min="0" step="100" inputmode="decimal" />
+            </label>
+            <label class="field">
+              <span>Sparrate € / Monat</span>
+              <input type="number" id="fc-monthly" min="0" step="25" inputmode="decimal" />
+            </label>
+            <label class="field range">
+              <span>Anlagedauer: <output id="fc-years-out"></output></span>
+              <input type="range" id="fc-years" min="1" max="40" step="1" />
+            </label>
+            <label class="field">
+              <span>Rendite % p. a.</span>
+              <input type="number" id="fc-return" min="-10" max="20" step="0.1" inputmode="decimal" />
+            </label>
+            <label class="field">
+              <span>Volatilität % p. a.</span>
+              <input type="number" id="fc-vol" min="0" max="100" step="0.5" inputmode="decimal" />
+            </label>
+            <label class="field">
+              <span>Sparziel € (optional)</span>
+              <input type="number" id="fc-goal" min="0" step="1000" inputmode="decimal" />
+            </label>
+            <label class="check">
+              <input type="checkbox" id="fc-inflation" /> Inflationsbereinigt (2 % p. a.)
+            </label>
+          </form>
+          <p class="muted small no-margin" id="fc-assumption"></p>
+          <div class="fc-kpis" id="fc-kpis"></div>
+          <div class="fan" id="fan-chart" role="img" aria-label="Fächerdiagramm der simulierten Depotentwicklung"></div>
+          <details class="fc-table-wrap">
+            <summary>Werte als Tabelle</summary>
+            <div class="table-wrap"><table class="fc-table" id="fc-table"></table></div>
+          </details>
+        </section>
+
         <details class="card method">
           <summary>So wird bewertet</summary>
           <ul>
@@ -372,6 +441,8 @@
             <li><strong>Beta</strong>: Kovarianz der Depotrenditen mit dem Vergleichsindex, geteilt durch dessen Varianz (letzte 12 Monate). Beta 1,2 heißt: Das Depot schwankt im Schnitt 20 % stärker als der Index.</li>
             <li><strong>Laufende Kosten</strong>: Gewichtete TER aller Positionen (Einzelaktien 0 %). Die 10-Jahres-Kosten unterstellen 5 % Bruttorendite p. a. und enthalten den entgangenen Zinseszins.</li>
             <li><strong>Verbesserungsvorschläge</strong> werden mit derselben Bewertung durchgerechnet; angezeigt werden nur Umschichtungen, die den Streuungs-Score um mindestens 5 Punkte erhöhen oder die Volatilität um mindestens 1,5 Prozentpunkte senken.</li>
+            <li><strong>Zukunftsprojektion</strong>: 2.000 simulierte Verläufe mit log-normalverteilten Monatsrenditen. Die Renditeannahme ergibt sich aus langfristigen Richtwerten je Anlageklasse (Aktien 7 %, Anleihen 3 %, Gold 3,5 %) abzüglich TER, die Volatilität aus den letzten 12 Monaten des Depots – beides ist anpassbar. Die Bänder zeigen, in welchem Bereich 50 % bzw. 80 % der Verläufe lagen.</li>
+            <li><strong>Währungen</strong>: Bei aktiver Umrechnung werden alle Kurse täglich mit dem Wechselkurs (EUR/USD, EUR/CHF, …) in Euro umgerechnet. Damit fließt das Währungsrisiko in Volatilität, Korrelationen und Drawdown ein. Kaufkurse werden in Euro erfasst.</li>
             <li>Die verwendeten US-ETFs dienen als Datenquelle. Privatanleger in der EU kaufen in der Regel vergleichbare UCITS-ETFs (z. B. auf den MSCI World).</li>
           </ul>
           <p class="muted small no-margin">Alle Auswertungen beruhen auf historischen Kursen und sind keine Prognose und keine Anlageberatung.</p>

@@ -5,6 +5,30 @@ import { lookupSecurity } from './securities.js';
 
 const cache = new Map();
 
+// Wechselkurse als „1 EUR = x Fremdwährung“ (wie bei Twelve Data, z. B. EUR/USD).
+// Profile steuern nur die simulierten Demodaten.
+export const FX_PROFILES = {
+  'EUR/USD': { start: 1.08, idio: 0.0045, beta: 0, alpha: 0, etf: true, decimals: 4 },
+  'EUR/CHF': { start: 0.95, idio: 0.003, beta: 0, alpha: 0, etf: true, decimals: 4 },
+  'EUR/GBP': { start: 0.85, idio: 0.0033, beta: 0, alpha: 0, etf: true, decimals: 4 },
+  'EUR/DKK': { start: 7.46, idio: 0.0002, beta: 0, alpha: 0, etf: true, decimals: 4 },
+  'EUR/JPY': { start: 160, idio: 0.006, beta: 0, alpha: 0, etf: true, decimals: 2 },
+};
+
+export const fxSymbol = (currency) => `EUR/${currency}`;
+export const hasFx = (currency) => fxSymbol(currency) in FX_PROFILES;
+
+// Rechnet Kurse in Euro um: Kurs in Fremdwährung ÷ (Fremdwährung je Euro).
+// Tage ohne Wechselkurs nutzen den letzten bekannten (bzw. ersten verfügbaren) Kurs.
+export function convertToEur(bars, fxBars) {
+  const byDate = new Map(fxBars.map((b) => [b.time, b.close]));
+  let fx = fxBars[0]?.close ?? 1;
+  return bars.map((b) => {
+    fx = byDate.get(b.time) ?? fx;
+    return { ...b, open: b.open / fx, high: b.high / fx, low: b.low / fx, close: b.close / fx };
+  });
+}
+
 export class MissingApiKeyError extends Error {
   constructor() {
     super('Für echte Kursdaten bitte zuerst einen Twelve Data API-Key in den Einstellungen hinterlegen.');
@@ -35,7 +59,7 @@ export async function loadSeries(symbol, { source, apiKey, onWait } = {}) {
     result = { bars: res.bars, meta: { ...res.meta, source, sourceLabel: 'Twelve Data' } };
   } else {
     result = {
-      bars: generateDemoBars(symbol),
+      bars: generateDemoBars(symbol, { profile: FX_PROFILES[symbol] }),
       meta: {
         name: lookupSecurity(symbol)?.name ?? symbol,
         currency: lookupSecurity(symbol)?.currency ?? '',

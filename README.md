@@ -94,6 +94,14 @@ npm test         # Unit- und API-Tests
 
 Beim ersten Start werden `data/app.db` (SQLite) und `data/secret.key` (Schlüssel für Zugangsdaten) angelegt. Beides **nicht** einchecken und gemeinsam sichern – ohne den Schlüssel sind gespeicherte Zugangsdaten nicht mehr lesbar.
 
+### Mockup ohne Server
+
+```bash
+npm run build:mockup   # erzeugt dist/mockup/
+```
+
+Der Mockup enthält das unveränderte Frontend und simuliert die Server-API im Browser (`mock/mock-server.js`): Demo-Konto `demo@beispiel.de` / `Demo-Passwort-2026` mit Beispieldepots und einer Demo-Bankverbindung. Er läuft auf jedem statischen Webserver und eignet sich zum Vorführen. Alle Daten, auch Passwörter, liegen dort im Klartext im Browser – nur zum Ausprobieren, nie mit echten Zugangsdaten.
+
 ### Konfiguration (Umgebungsvariablen)
 
 | Variable | Standard | Bedeutung |
@@ -140,6 +148,8 @@ js/data.js            Demodaten, Twelve-Data-Anbindung, CSV-Parser
 js/util.js            Formatierung und Hilfsfunktionen
 js/vendor/            TradingView Lightweight Charts™ v4.2.3 (Apache 2.0)
 tests/                Node-Tests (node --test), inkl. API-Tests gegen einen Testserver
+mock/                 Simulierter Server für den Mockup (nur im Mockup-Build eingebunden)
+scripts/build-mockup.js  Baut den Mockup nach dist/mockup/
 ```
 
 ## Hinweis

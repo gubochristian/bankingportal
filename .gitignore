@@ -2,3 +2,5 @@ node_modules/
 .DS_Store
 # Datenbank und Schlüssel – niemals einchecken
 data/
+# Build-Ausgabe (Mockup)
+dist/

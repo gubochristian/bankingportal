@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js",
+    "build:mockup": "node scripts/build-mockup.js"
   },
   "engines": {
     "node": ">=22.5"

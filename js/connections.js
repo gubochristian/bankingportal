@@ -207,7 +207,7 @@ export function initConnections({ depot }) {
   async function readText(file) {
     const buf = await file.arrayBuffer();
     const utf8 = new TextDecoder('utf-8').decode(buf);
-    return utf8.includes('�') ? new TextDecoder('windows-1252').decode(buf) : utf8;
+    return utf8.includes('\uFFFD') ? new TextDecoder('windows-1252').decode(buf) : utf8;
   }
 
   async function sync(c, btn) {

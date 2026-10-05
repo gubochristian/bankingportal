@@ -110,3 +110,83 @@ export function defaultMeta(symbol) {
     known: !!s,
   };
 }
+
+// ISIN je Symbol (für die Zuordnung von Bank- und Brokerdaten)
+export const ISINS = {
+  AAPL: 'US0378331005',
+  MSFT: 'US5949181045',
+  NVDA: 'US67066G1040',
+  AMZN: 'US0231351067',
+  GOOGL: 'US02079K3059',
+  META: 'US30303M1027',
+  TSLA: 'US88160R1014',
+  JPM: 'US46625H1005',
+  V: 'US92826C8394',
+  JNJ: 'US4781601046',
+  UNH: 'US91324P1021',
+  PG: 'US7427181091',
+  KO: 'US1912161007',
+  WMT: 'US9311421039',
+  XOM: 'US30231G1022',
+  'BRK.B': 'US0846707026',
+  SAP: 'DE0007164600',
+  SIE: 'DE0007236101',
+  ALV: 'DE0008404005',
+  MUV2: 'DE0008430026',
+  DTE: 'DE0005557508',
+  BAS: 'DE000BASF111',
+  BAYN: 'DE000BAY0017',
+  BMW: 'DE0005190003',
+  MBG: 'DE0007100000',
+  VOW3: 'DE0007664039',
+  ADS: 'DE000A1EWWW0',
+  IFX: 'DE0006231004',
+  DBK: 'DE0005140008',
+  RWE: 'DE0007037129',
+  VNA: 'DE000A1ML7J1',
+  ASML: 'NL0010273215',
+  NESN: 'CH0038863350',
+  NOVN: 'CH0012005267',
+  NVO: 'DK0062498333',
+  MC: 'FR0000121014',
+  SHEL: 'GB00BP6MXD84',
+  TSM: 'US8740391003',
+  TM: 'JP3633400001',
+  URTH: 'US4642863926',
+  VT: 'US9220427424',
+  SPY: 'US78462F1030',
+  QQQ: 'US46090E1038',
+  VGK: 'US9220428745',
+  EEM: 'US4642872349',
+  AGG: 'US4642872265',
+  BND: 'US9219378356',
+  TLT: 'US4642874329',
+  GLD: 'US78463V1070',
+};
+
+// Verbreitete europäische UCITS-ETFs ohne eigene Kursdaten in dieser App: Sie werden
+// für die Analyse auf ein US-Pendant mit gleichem Index abgebildet (Datenproxy).
+export const ISIN_ALIASES = {
+  IE00B4L5Y983: { symbol: 'URTH', name: 'iShares Core MSCI World UCITS ETF' },
+  IE00BJ0KDQ92: { symbol: 'URTH', name: 'Xtrackers MSCI World UCITS ETF 1C' },
+  LU0274208692: { symbol: 'URTH', name: 'Xtrackers MSCI World Swap UCITS ETF 1C' },
+  IE00BK5BQT80: { symbol: 'VT', name: 'Vanguard FTSE All-World UCITS ETF (Acc)' },
+  IE00B3RBWM25: { symbol: 'VT', name: 'Vanguard FTSE All-World UCITS ETF (Dist)' },
+  IE00B5BMR087: { symbol: 'SPY', name: 'iShares Core S&P 500 UCITS ETF' },
+  IE00BKM4GZ66: { symbol: 'EEM', name: 'iShares Core MSCI EM IMI UCITS ETF' },
+  IE00B4L5YC18: { symbol: 'EEM', name: 'iShares MSCI EM UCITS ETF' },
+  IE00B945VV12: { symbol: 'VGK', name: 'Vanguard FTSE Developed Europe UCITS ETF' },
+  IE00B53SZB19: { symbol: 'QQQ', name: 'iShares Nasdaq 100 UCITS ETF' },
+};
+
+const BY_ISIN = Object.fromEntries(Object.entries(ISINS).map(([sym, isin]) => [isin, sym]));
+
+// Liefert { symbol, name, proxy } für eine ISIN oder null
+export function lookupByIsin(isin) {
+  const key = String(isin ?? '').trim().toUpperCase();
+  if (BY_ISIN[key]) return { symbol: BY_ISIN[key], name: SECURITIES[BY_ISIN[key]].name, proxy: false };
+  if (ISIN_ALIASES[key]) return { ...ISIN_ALIASES[key], proxy: true };
+  return null;
+}
+
+export const isValidIsin = (isin) => /^[A-Z]{2}[A-Z0-9]{9}[0-9]$/.test(String(isin ?? '').toUpperCase());

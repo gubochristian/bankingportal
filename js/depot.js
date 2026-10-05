@@ -29,17 +29,33 @@ const LEVEL_ICON = { critical: '✕', warning: '!', info: 'i', good: '✓' };
 let nextId = 1;
 const newId = (prefix = 'p') => `${prefix}${Date.now().toString(36)}${nextId++}`;
 
-// Gespeicherte Depots laden; übernimmt das Einzeldepot aus der Vorversion
-function loadDepots() {
-  const saved = storage.get('depots', null);
+// Startzustand: gespeicherte Depots aus dem Konto oder ein leeres Depot
+function initialDepots(saved) {
   if (saved?.list?.length) return saved;
-  const legacy = storage.get('depot', null);
-  const first = { id: newId('d'), name: 'Mein Depot', mode: 'amount', positions: [], benchmark: 'URTH', ...(legacy ?? {}) };
+  const first = { id: newId('d'), name: 'Mein Depot', mode: 'amount', positions: [], benchmark: 'URTH' };
   return { activeId: first.id, list: [first] };
 }
 
-export function initDepot({ getSource, getApiKey, openSettings }) {
-  const depots = loadDepots();
+// Liest lokal gespeicherte Depots aus Versionen ohne Login (für die einmalige Übernahme ins Konto)
+export function readLocalDepots() {
+  const saved = storage.get('depots', null);
+  if (saved?.list?.some((d) => d.positions?.length)) return saved;
+  const legacy = storage.get('depot', null);
+  if (legacy?.positions?.length) {
+    const first = { id: newId('d'), name: 'Mein Depot', mode: 'amount', benchmark: 'URTH', ...legacy };
+    return { activeId: first.id, list: [first] };
+  }
+  return null;
+}
+
+export function clearLocalDepots() {
+  storage.remove('depots');
+  storage.remove('depot');
+}
+
+// persist(depots): speichert den gesamten Depotbestand (im Konto auf dem Server)
+export function initDepot({ getSource, getApiKey, openSettings, savedDepots, persist }) {
+  const depots = initialDepots(savedDepots);
   const active = () => depots.list.find((d) => d.id === depots.activeId) ?? depots.list[0];
 
   const state = {
@@ -68,15 +84,102 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       convertFx: state.convertFx,
       forecast: state.forecast,
     });
-    storage.set('depots', depots);
+    persist(depots);
   }
 
   // ---------- Mehrere Depots ----------
 
   function renderDepotSelect() {
     const sel = $('#depot-select');
-    sel.replaceChildren(...depots.list.map((d) => new Option(d.name, d.id, false, d.id === depots.activeId)));
+    sel.replaceChildren(...depots.list.map((d) => new Option(d.connectionId ? `${d.name} 🔗` : d.name, d.id, false, d.id === depots.activeId)));
     $('#depot-delete').disabled = depots.list.length < 2;
+    const d = active();
+    const note = $('#depot-link-note');
+    note.hidden = !d.connectionId;
+    if (d.connectionId) {
+      note.textContent =
+        `🔗 Mit einer Bankverbindung verknüpft${d.syncedAt ? ` · Stand ${new Date(d.syncedAt).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' })}` : ''}. ` +
+        'Ein erneuter Abruf unter „Schnittstellen“ überschreibt die Stückzahlen; Anpassungen an Sektor, Region und TER bleiben erhalten.';
+    }
+  }
+
+  // ---------- Übernahme aus Bankverbindungen ----------
+
+  function findLinkedDepot(connectionId) {
+    return depots.list.find((d) => d.connectionId === connectionId) ?? null;
+  }
+
+  // Legt das verknüpfte Depot an bzw. aktualisiert es mit den abgerufenen Positionen.
+  function importFromConnection({ connectionId, label, positions }) {
+    let d = findLinkedDepot(connectionId);
+    const previous = new Map((d?.positions ?? []).map((p) => [p.symbol, p]));
+    const mapped = positions.map((p) => {
+      const meta = stripKnown(defaultMeta(p.symbol));
+      const old = previous.get(p.symbol);
+      const pos = {
+        id: old?.id ?? newId(),
+        symbol: p.symbol,
+        ...meta,
+        // Nutzeranpassungen (Klasse, Sektor, Region, Währung, TER) aus dem letzten Stand behalten
+        ...(old ? { type: old.type, sector: old.sector, region: old.region, currency: old.currency, ...(old.ter !== undefined ? { ter: old.ter } : {}) } : {}),
+        name: p.name || meta.name,
+        quantity: p.quantity,
+        isin: p.isin ?? undefined,
+      };
+      // Ohne Zuordnung zu einem Symbol mit Kursdaten – darf keine (simulierten) Kurse bekommen
+      if (!p.known) pos.unmapped = true;
+      if (!old && !lookupSecurity(p.symbol) && p.currency) pos.currency = p.currency;
+      // Kaufkurse werden in Euro geführt – nur übernehmen, wenn die Bank sie in Euro liefert
+      if (p.buyPrice !== null && p.buyCurrency === 'EUR') pos.buyPrice = p.buyPrice;
+      else if (old?.buyPrice) pos.buyPrice = old.buyPrice;
+      return pos;
+    });
+    if (!d) {
+      d = { id: newId('d'), name: label, mode: 'shares', positions: [], benchmark: 'URTH', convertFx: true, connectionId };
+      depots.list.push(d);
+    }
+    Object.assign(d, { positions: mapped, mode: 'shares', syncedAt: Date.now() });
+    if (d.id === depots.activeId) {
+      state.positions = d.positions;
+      state.mode = 'shares';
+      renderMode();
+      if (state.visible) refresh();
+      else renderTable();
+    }
+    persist(depots);
+    renderDepotSelect();
+    return {
+      depotId: d.id,
+      depotName: d.name,
+      unknown: positions.filter((p) => !p.known).map((p) => p.name || p.symbol),
+      proxies: positions.filter((p) => p.proxy).map((p) => `${p.name} → ${p.symbol}`),
+    };
+  }
+
+  function unlinkConnection(connectionId) {
+    const d = findLinkedDepot(connectionId);
+    if (!d) return;
+    delete d.connectionId;
+    persist(depots);
+    renderDepotSelect();
+  }
+
+  function openDepot(id) {
+    if (depots.list.some((d) => d.id === id) && id !== depots.activeId) {
+      depots.activeId = id;
+      const d = active();
+      state.mode = d.mode ?? 'amount';
+      state.positions = d.positions ?? [];
+      state.benchmark = d.benchmark ?? 'URTH';
+      state.convertFx = d.convertFx ?? true;
+      state.forecast = { monthly: 100, years: 15, inflation: false, ...(d.forecast ?? {}) };
+      persist(depots);
+      syncControls();
+      renderDepotSelect();
+      renderMode();
+    }
+    if (location.hash === '#depot') refresh();
+    else location.hash = '#depot';
   }
 
   function switchDepot(id) {
@@ -87,7 +190,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     state.benchmark = d.benchmark ?? 'URTH';
     state.convertFx = d.convertFx ?? true;
     state.forecast = { monthly: 100, years: 15, inflation: false, ...(d.forecast ?? {}) };
-    storage.set('depots', depots);
+    persist(depots);
     syncControls();
     renderDepotSelect();
     renderMode();
@@ -364,8 +467,8 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
   // Aktueller Wert jeder Position aus Menge bzw. Betrag und letztem Kurs (in Euro)
   function positionValues(positions = state.positions, mode = state.mode, bars = barsFor) {
     return positions.map((p) => {
-      const last = bars(p.symbol, p.currency)?.at(-1)?.close ?? null;
-      const rawLast = state.series[p.symbol]?.at(-1)?.close ?? null;
+      const last = p.unmapped ? null : (bars(p.symbol, p.currency)?.at(-1)?.close ?? null);
+      const rawLast = p.unmapped ? null : (state.series[p.symbol]?.at(-1)?.close ?? null);
       if (mode === 'amount') return { id: p.id, last, rawLast, value: p.amount > 0 ? p.amount : null, costBasis: null };
       const value = last !== null && p.quantity > 0 ? p.quantity * last : null;
       const costBasis = p.buyPrice > 0 && p.quantity > 0 ? p.buyPrice * p.quantity : null;
@@ -449,7 +552,11 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     renderTable();
     showMessage('');
 
-    if (!(await loadMissing(state.positions.map((p) => p.symbol), { token, label: 'Lade Kurse', critical: true }))) return;
+    for (const p of state.positions) {
+      if (p.unmapped) state.errors[p.symbol] = 'Keine Kursdaten – Wertpapier konnte keinem Symbol zugeordnet werden';
+    }
+    const loadable = state.positions.filter((p) => !p.unmapped).map((p) => p.symbol);
+    if (!(await loadMissing(loadable, { token, label: 'Lade Kurse', critical: true }))) return;
     // Vergleichsindex und Bausteine für Vorschläge (Fehler hier sind nicht kritisch)
     if (!(await loadMissing(extraSymbols(state.benchmark), { token, label: 'Lade Vergleichsdaten', critical: false }))) return;
     if (state.convertFx) {
@@ -500,7 +607,7 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
     const values = positionValues(positions, mode, bars);
     const input = positions
       .map((p, i) => ({ p, v: values[i] }))
-      .filter(({ p, v }) => v.value > 0 && bars(p.symbol, p.currency))
+      .filter(({ p, v }) => !p.unmapped && v.value > 0 && bars(p.symbol, p.currency))
       .map(({ p, v }) => toInput(p, v.value, v.costBasis));
     const series = Object.fromEntries(input.map((p) => [p.symbol, bars(p.symbol, p.currency)]));
     for (const sym of extraSymbols(benchmark)) {
@@ -1236,6 +1343,10 @@ export function initDepot({ getSource, getApiKey, openSettings }) {
       if (state.visible) refresh();
     },
     addPosition,
+    importFromConnection,
+    findLinkedDepot,
+    unlinkConnection,
+    openDepot,
   };
 }
 

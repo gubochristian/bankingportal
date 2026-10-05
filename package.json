@@ -1,14 +1,14 @@
 {
   "name": "aktienanalyse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Web-Tool zur technischen Aktienanalyse",
+  "description": "Web-Tool zur Aktien- und Depotanalyse mit Login und Bankschnittstellen",
   "type": "module",
   "scripts": {
-    "start": "node scripts/serve.js",
-    "test": "node --test tests/*.test.js"
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5"
   }
 }

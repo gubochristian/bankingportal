@@ -1,6 +1,6 @@
 # Aktienanalyse
 
-Web-Tool zur technischen Analyse von Aktien – läuft komplett im Browser, ohne Build-Schritt und ohne Abhängigkeiten.
+Web-Tool zur Aktien- und Depotanalyse mit Benutzerkonten und Schnittstellen zu Banken und Brokern – ohne Build-Schritt und ohne externe Abhängigkeiten (nur Node.js).
 
 ## Funktionen
 
@@ -51,27 +51,82 @@ Die Berechnungsmethodik ist in der App unter „So wird bewertet“ beschrieben.
 | Quelle | Beschreibung |
 | --- | --- |
 | **Demodaten** | Simulierte, reproduzierbare Kurse pro Symbol – zum Ausprobieren ohne Account. Keine echten Kurse! Ein einfaches Faktormodell (Markt + Sektor + Einzeltitel) sorgt für realistische Korrelationen, damit die Depot-Bewertung aussagekräftig bleibt. |
-| **Twelve Data** | Echte Tageskurse über die [Twelve Data API](https://twelvedata.com). Kostenlosen API-Key in den Einstellungen (Zahnrad) hinterlegen; er wird nur lokal im Browser gespeichert. Der kostenlose Tarif erlaubt nur wenige Abrufe pro Minute – bei größeren Depots wartet die App automatisch. Kurse werden pro Sitzung zwischengespeichert. |
+| **Twelve Data** | Echte Tageskurse über die [Twelve Data API](https://twelvedata.com). Kostenlosen API-Key in den Einstellungen (Zahnrad) hinterlegen; er wird verschlüsselt im Konto gespeichert. Der kostenlose Tarif erlaubt nur wenige Abrufe pro Minute – bei größeren Depots wartet die App automatisch. Kurse werden pro Sitzung zwischengespeichert. |
 | **CSV-Import** | Eigene Kursdaten, z. B. Yahoo-Finance-Export (`Date,Open,High,Low,Close,Adj Close,Volume`) oder deutsches Format mit Semikolon und Dezimalkomma (`Datum;Eröffnung;Hoch;Tief;Schlusskurs;Volumen`). Mindestens Datum und Schlusskurs sind nötig. Beispiel: `examples/beispiel.csv` |
+
+## Konto, Anmeldung & Sitzungen
+
+Die App ist nur nach Anmeldung nutzbar. Depots, Einstellungen und Bankverbindungen werden pro Nutzerkonto auf dem Server gespeichert.
+
+- **Registrierung & Login** mit E-Mail und Passwort (mind. 10 Zeichen, einfache Passwörter werden abgelehnt)
+- **Passwörter** werden mit scrypt und zufälligem Salt gehasht
+- **Sitzungen:** zufälliges 256-Bit-Token im Cookie (`HttpOnly`, `SameSite=Strict`, `Secure` unter HTTPS); in der Datenbank liegt nur der SHA-256-Hash
+- **Automatische Abmeldung** nach 30 Minuten Inaktivität und spätestens nach 12 Stunden; zwei Minuten vorher erscheint eine Warnung mit „Angemeldet bleiben“
+- **Schutz vor Brute Force:** Sperre nach 5 Fehlversuchen je E-Mail-Adresse und IP für 15 Minuten; gleiche Fehlermeldung für unbekannte E-Mail und falsches Passwort
+- **Schutz vor Session Fixation** (neues Token bei jedem Login) und **CSRF** (Same-Origin-Prüfung, nur JSON-Anfragen)
+- **Konto-Seite:** aktive Sitzungen mit Gerät und IP einsehen und einzeln oder gesammelt beenden, Passwort ändern (beendet alle anderen Sitzungen), Aktivitätsprotokoll, Konto löschen
+- **Sicherheits-Header:** Content-Security-Policy, `X-Frame-Options: DENY`, `nosniff`, HSTS unter HTTPS
+- Läuft die Sitzung ab, erscheint die Anmeldung; danach geht es ohne Datenverlust weiter
+
+## Schnittstellen zu Banken & Brokern (`#verbindungen`)
+
+Nutzer richten Verbindungen selbst ein. Abgerufene Bestände landen in einem **verknüpften Depot**, das bei jedem Abruf aktualisiert wird; eigene Anpassungen (Sektor, Region, TER) bleiben erhalten.
+
+| Anbieter | Status | Beschreibung |
+| --- | --- | --- |
+| Demo-Bank | verfügbar | Simulierte Bank mit Anmeldename und PIN zum Ausprobieren |
+| Depotauszug (CSV) | verfügbar | Bestandsexport fast jeder Bank; Spalten (ISIN, WKN, Bezeichnung, Stück, Einstandskurs …) und Formate werden automatisch erkannt |
+| Trading 212 | Beta | Offizielle Public API (API-Schlüssel, nur Lesezugriff) – noch nicht mit einem echten Konto getestet |
+| FinTS/HBCI, finAPI, comdirect, Interactive Brokers | geplant | in der App mit den jeweiligen Voraussetzungen beschrieben |
+
+- **Zugangsdaten** (PIN, API-Schlüssel) werden mit AES-256-GCM verschlüsselt gespeichert, an Nutzer und Verbindung gebunden und nie an den Browser zurückgegeben (Anzeige nur maskiert)
+- Positionen werden über die **ISIN** den Wertpapieren mit Kursdaten zugeordnet; verbreitete UCITS-ETFs (z. B. iShares Core MSCI World) werden auf ein US-Pendant mit gleichem Index abgebildet. Nicht zuordenbare Positionen werden angezeigt, fließen aber nicht in die Analyse ein
+- **Neuen Anbieter hinzufügen:** Datei in `server/connectors/` anlegen (Felder, `test()`, `fetchPositions()`) und in `server/connectors/index.js` registrieren – Formular, Verschlüsselung und Übernahme ins Depot funktionieren dann automatisch
 
 ## Starten
 
-Voraussetzung: Node.js ≥ 18 (nur für den lokalen Webserver und die Tests).
+Voraussetzung: Node.js ≥ 22.5 (nutzt das eingebaute `node:sqlite`).
 
 ```bash
-npm start        # startet http://localhost:8080
-npm test         # Unit-Tests für Indikatoren, Depot-Bewertung, Vorschläge, Prognose, Umrechnung und Import
+npm start        # startet http://127.0.0.1:8080
+npm test         # Unit- und API-Tests
 ```
 
-Alternativ funktioniert jeder statische Webserver, z. B. `python3 -m http.server 8080`.
-Direktes Öffnen der `index.html` per Doppelklick funktioniert nicht, da Browser ES-Module über `file://` blockieren.
+Beim ersten Start werden `data/app.db` (SQLite) und `data/secret.key` (Schlüssel für Zugangsdaten) angelegt. Beides **nicht** einchecken und gemeinsam sichern – ohne den Schlüssel sind gespeicherte Zugangsdaten nicht mehr lesbar.
+
+### Konfiguration (Umgebungsvariablen)
+
+| Variable | Standard | Bedeutung |
+| --- | --- | --- |
+| `PORT` / `HOST` | `8080` / `127.0.0.1` | Adresse des Servers |
+| `DATA_DIR` | `./data` | Ablage für Datenbank und Schlüssel |
+| `APP_SECRET` | – | Geheimnis für die Verschlüsselung (statt `secret.key`), z. B. aus einem Secret-Store |
+| `SESSION_IDLE_MINUTES` | `30` | Abmeldung nach Inaktivität |
+| `SESSION_MAX_HOURS` | `12` | maximale Sitzungsdauer |
+| `ALLOW_REGISTRATION` | `true` | Registrierung neuer Konten erlauben |
+| `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCK_MINUTES` | `5` / `15` | Sperre nach Fehlversuchen |
+| `COOKIE_SECURE` | `auto` | `Secure`-Cookie bei HTTPS; `true` erzwingt es |
+| `TRUST_PROXY` | `false` | hinter einem Reverse Proxy auf `true` setzen (für IP-Adresse und HTTPS-Erkennung) |
+
+**Produktivbetrieb:** nur hinter HTTPS (z. B. Reverse Proxy mit `TRUST_PROXY=true`), `APP_SECRET` setzen und Datenbank regelmäßig sichern.
 
 ## Projektstruktur
 
 ```
+server/index.js       Startpunkt des Servers
+server/app.js         HTTP-Server: API-Routen, Auth-Middleware, Sicherheits-Header, Auslieferung des Frontends
+server/auth.js        Registrierung, Login, Sitzungen, Brute-Force-Schutz, Protokoll
+server/security.js    Passwort-Hashing (scrypt), Tokens, AES-256-GCM-Verschlüsselung
+server/db.js          SQLite-Schema und Migrationen
+server/connectors/    Bank- und Broker-Schnittstellen (Registry, Demo-Bank, CSV, Trading 212, geplante)
 index.html            Seitenaufbau
 css/styles.css        Layout und Farben (Hell/Dunkel)
-js/app.js             Einzelanalyse (UI, Charts) und Navigation
+js/app.js             Start, Anmeldung, Navigation, Einzelanalyse (UI, Charts)
+js/api.js             Client für die Server-API
+js/auth-ui.js         Anmelde- und Registrierungsmaske
+js/session.js         Sitzungsüberwachung (Verlängerung bei Aktivität, Warnung vor Abmeldung)
+js/connections.js     Ansicht „Schnittstellen“
+js/account.js         Ansicht „Mein Konto“
 js/depot.js           Depot-Ansicht (Erfassung, Darstellung der Bewertung)
 js/portfolio.js       Depot-Bewertung: Allokation, Risiko, Benchmark, Stresstests, Kosten, Hinweise
 js/optimizer.js       Verbesserungsvorschläge durch simulierte Umschichtungen
@@ -84,8 +139,7 @@ js/market.js          Gemeinsamer Kurs-Loader mit Cache, Wechselkurse und Euro-U
 js/data.js            Demodaten, Twelve-Data-Anbindung, CSV-Parser
 js/util.js            Formatierung und Hilfsfunktionen
 js/vendor/            TradingView Lightweight Charts™ v4.2.3 (Apache 2.0)
-tests/                Node-Tests (node --test)
-scripts/serve.js      Minimaler Entwicklungs-Webserver
+tests/                Node-Tests (node --test), inkl. API-Tests gegen einen Testserver
 ```
 
 ## Hinweis

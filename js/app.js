@@ -3,7 +3,12 @@ import { sma, rsi, macd, bollinger } from './indicators.js';
 import { computeStats, computeSignals } from './analysis.js';
 import { parseCsv } from './data.js';
 import { loadSeries, MissingApiKeyError } from './market.js';
-import { initDepot } from './depot.js';
+import { initDepot, readLocalDepots, clearLocalDepots } from './depot.js';
+import { initConnections } from './connections.js';
+import { initAccount } from './account.js';
+import { api, sessionEvents } from './api.js';
+import { showLogin } from './auth-ui.js';
+import { startSessionWatch } from './session.js';
 import { $, storage, numberFmt, compactFmt, num, pct, date, toneClass, cssVar, withAlpha } from './util.js';
 
 // ---------- Zustand ----------
@@ -12,7 +17,7 @@ const state = {
   symbol: null,
   bars: [],
   source: storage.get('source', 'demo'),
-  apiKey: storage.get('twelvedataKey', ''),
+  apiKey: '', // wird nach der Anmeldung aus dem Konto geladen
   watchlist: storage.get('watchlist', ['AAPL', 'MSFT', 'NVDA', 'SAP']),
   overlays: storage.get('overlays', { sma20: false, sma50: true, sma200: true, bollinger: false, volume: true }),
   chartType: storage.get('chartType', 'candles'),
@@ -103,18 +108,24 @@ charts.forEach((source) => {
   });
 });
 
+// Ziel-Serie je Chart; im Kurschart die gerade sichtbare (Kerzen oder Linie)
 const crosshairTargets = [
-  [priceChart, series.candles],
-  [rsiChart, series.rsi],
-  [macdChart, series.macdLine],
+  [priceChart, () => (state.chartType === 'line' ? series.line : series.candles)],
+  [rsiChart, () => series.rsi],
+  [macdChart, () => series.macdLine],
 ];
 crosshairTargets.forEach(([source]) => {
   source.subscribeCrosshairMove((param) => {
     crosshairTargets
       .filter(([c]) => c !== source)
-      .forEach(([c, s]) => {
-        if (param.time) c.setCrosshairPosition(NaN, param.time, s);
-        else c.clearCrosshairPosition();
+      .forEach(([c, target]) => {
+        if (!param.time) return c.clearCrosshairPosition();
+        try {
+          c.setCrosshairPosition(NaN, param.time, target());
+        } catch {
+          // Zeitpunkt ohne Wert in diesem Chart (z. B. RSI am Anfang der Historie)
+          c.clearCrosshairPosition();
+        }
       });
     updateLegend(param.time);
   });
@@ -379,12 +390,16 @@ function openSettings() {
   dialog.showModal();
 }
 
-dialog.addEventListener('close', () => {
+dialog.addEventListener('close', async () => {
   if (dialog.returnValue !== 'save') return;
   state.apiKey = $('#api-key-input').value.trim();
-  storage.set('twelvedataKey', state.apiKey);
+  try {
+    await api.put('/api/settings', { settings: { twelvedataKey: state.apiKey } });
+  } catch (err) {
+    showMessage(`Einstellungen konnten nicht gespeichert werden: ${err.message}`);
+  }
   if (!state.apiKey || state.source !== 'twelvedata') return;
-  if (document.body.dataset.view === 'depot') depot.refresh();
+  if (document.body.dataset.view === 'depot') depot?.refresh();
   else if (state.symbol) load(state.symbol);
 });
 
@@ -399,7 +414,7 @@ $('#source-select').value = state.source;
 $('#source-select').addEventListener('change', (e) => {
   state.source = e.target.value;
   storage.set('source', state.source);
-  if (document.body.dataset.view === 'depot') depot.refresh();
+  if (document.body.dataset.view === 'depot') depot?.refresh();
   else if (state.symbol) load(state.symbol);
 });
 
@@ -454,34 +469,41 @@ $('#chart-type').addEventListener('change', (e) => {
 
 $('#depot-add-current').addEventListener('click', () => {
   if (!state.symbol) return;
-  const added = depot.addPosition(state.symbol);
+  const added = depot?.addPosition(state.symbol);
   showMessage(added ? `${state.symbol} wurde dem Depot hinzugefügt.` : `${state.symbol} ist bereits im Depot.`, 'info');
 });
 
-// ---------- Ansichten: Einzelanalyse (#SYMBOL) und Depot (#depot) ----------
+// ---------- Ansichten ----------
+// #SYMBOL = Einzelanalyse, #depot, #verbindungen, #konto
 
-const depot = initDepot({
-  getSource: () => state.source,
-  getApiKey: () => state.apiKey,
-  openSettings,
-});
+let depot = null;
+let connections = null;
+let account = null;
+let currentUser = null;
+let sessionWatch = null;
+
+const VIEWS = { depot: 'depot', verbindungen: 'connections', konto: 'account' };
+const TITLES = { depot: 'Depot', connections: 'Schnittstellen', account: 'Mein Konto' };
 
 function route() {
+  if (!depot) return;
   const hash = decodeURIComponent(location.hash.slice(1));
-  const view = hash.toLowerCase() === 'depot' ? 'depot' : 'analysis';
+  const view = VIEWS[hash.toLowerCase()] ?? 'analysis';
   document.body.dataset.view = view;
-  document.querySelectorAll('.nav-tabs a').forEach((a) => {
-    const active = a.dataset.view === view;
+  document.querySelectorAll('.nav-tabs a, #account-link').forEach((a) => {
+    const active = (a.dataset.view ?? 'account') === view;
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  if (view === 'depot') {
-    document.title = 'Depot – Aktienanalyse';
-    depot.show();
+  if (view !== 'depot') depot.hide();
+  if (view !== 'analysis') {
+    document.title = `${TITLES[view]} – Aktienanalyse`;
+    if (view === 'depot') depot.show();
+    if (view === 'connections') connections.show();
+    if (view === 'account') account.show();
     return;
   }
-  depot.hide();
   $('#nav-analysis').href = state.symbol ? `#${encodeURIComponent(state.symbol)}` : '#';
   const sym = hash || state.symbol || storage.get('lastSymbol', null) || state.watchlist[0] || 'AAPL';
   // Nach einem Quellenwechsel in der Depot-Ansicht neu laden (CSV-Daten bleiben erhalten)
@@ -494,8 +516,160 @@ window.addEventListener('hashchange', route);
 
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
+// ---------- Speichern der Depots im Konto ----------
+
+const depotStore = (() => {
+  let pending = null;
+  let timer = null;
+  let saving = false;
+  const status = (text, kind = '') => {
+    const el = $('#save-status');
+    el.textContent = text;
+    el.dataset.kind = kind;
+  };
+
+  async function flush() {
+    clearTimeout(timer);
+    if (!pending || saving) return;
+    const doc = pending;
+    pending = null;
+    saving = true;
+    status('Wird gespeichert …');
+    try {
+      await api.put('/api/depots', { depots: doc });
+      status('✓ Gespeichert', 'ok');
+    } catch (err) {
+      pending ??= doc; // beim nächsten Versuch erneut senden
+      status(err.status === 401 ? 'Nicht gespeichert – bitte erneut anmelden' : 'Nicht gespeichert – neuer Versuch …', 'error');
+      if (err.status !== 401) timer = setTimeout(flush, 5000);
+    } finally {
+      saving = false;
+      if (pending && !timer) timer = setTimeout(flush, 600);
+    }
+  }
+
+  return {
+    save(doc) {
+      pending = structuredClone(doc);
+      clearTimeout(timer);
+      timer = setTimeout(flush, 600);
+      status('Ungespeicherte Änderungen');
+    },
+    flush,
+    // Beim Schließen der Seite noch offene Änderungen senden
+    flushOnExit() {
+      if (!pending) return;
+      fetch('/api/depots', {
+        method: 'PUT',
+        keepalive: true,
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ depots: pending }),
+      });
+      pending = null;
+    },
+  };
+})();
+
+window.addEventListener('pagehide', () => depotStore.flushOnExit());
+
+// ---------- Anmeldung, Abmeldung, Sitzungsablauf ----------
+
+async function logout() {
+  await depotStore.flush();
+  try {
+    await api.post('/api/auth/logout');
+  } catch {
+    // Sitzung ggf. schon abgelaufen
+  }
+  // Neu laden, damit keine Daten des bisherigen Nutzers im Speicher bleiben
+  location.hash = '';
+  location.reload();
+}
+
+$('#logout-button').addEventListener('click', logout);
+
+let reloginOpen = false;
+async function handleExpired(message) {
+  if (reloginOpen || !currentUser) return;
+  reloginOpen = true;
+  sessionWatch?.stop();
+  document.querySelectorAll('dialog[open]').forEach((d) => d.close());
+  const previous = currentUser;
+  const user = await showLogin({ message, email: previous.email });
+  reloginOpen = false;
+  if (user.id !== previous.id) {
+    // anderer Nutzer: sauber neu starten
+    location.reload();
+    return;
+  }
+  await startSession(user);
+  depotStore.flush();
+}
+
+sessionEvents.addEventListener('expired', (e) => handleExpired(e.detail));
+
+async function startSession(user) {
+  currentUser = user;
+  $('#user-label').textContent = user.name || user.email;
+  $('#account-link').title = `Angemeldet als ${user.email}`;
+  const me = await api.get('/api/auth/me');
+  sessionWatch?.stop();
+  sessionWatch = startSessionWatch({ expiresAt: me.session.expiresAt, onExpired: handleExpired });
+}
+
 // ---------- Start ----------
 
-applyTheme();
-renderWatchlist();
-route();
+async function boot() {
+  applyTheme();
+  renderWatchlist();
+  let user = null;
+  try {
+    user = (await api.get('/api/auth/me')).user;
+  } catch (err) {
+    if (err.status === 0) {
+      $('#boot-screen').textContent = err.message;
+      return;
+    }
+  }
+  $('#boot-screen').hidden = true;
+  if (!user) user = await showLogin();
+  document.body.dataset.auth = 'in';
+  await startSession(user);
+
+  // Konto-Daten laden: Einstellungen und Depots
+  const [{ settings }, { depots: saved }] = await Promise.all([api.get('/api/settings'), api.get('/api/depots')]);
+  state.apiKey = settings.twelvedataKey ?? '';
+  // API-Schlüssel aus früheren Versionen (localStorage) einmalig ins Konto übernehmen
+  const localKey = storage.get('twelvedataKey', '');
+  if (localKey) {
+    if (!state.apiKey) {
+      state.apiKey = localKey;
+      await api.put('/api/settings', { settings: { twelvedataKey: localKey } }).catch(() => {});
+    }
+    storage.remove('twelvedataKey');
+  }
+
+  let savedDepots = saved;
+  const local = readLocalDepots();
+  if (!saved && local) {
+    if (confirm('Auf diesem Gerät wurden Depots aus einer früheren Version gefunden. Sollen sie in dein Konto übernommen werden?')) {
+      savedDepots = local;
+      await api.put('/api/depots', { depots: local }).catch(() => {});
+      clearLocalDepots();
+    }
+  }
+
+  depot = initDepot({
+    getSource: () => state.source,
+    getApiKey: () => state.apiKey,
+    openSettings,
+    savedDepots,
+    persist: (doc) => depotStore.save(doc),
+  });
+  connections = initConnections({ depot });
+  account = initAccount({ getUser: () => currentUser, onLoggedOut: () => location.reload() });
+  route();
+}
+
+boot();

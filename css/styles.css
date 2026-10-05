@@ -620,8 +620,11 @@ dialog::backdrop {
   box-shadow: var(--shadow);
 }
 
-body[data-view='depot'] .analysis-only,
-body[data-view='analysis'] .depot-only {
+body:not([data-view='analysis']) .analysis-only,
+body:not([data-view='depot']) .depot-only,
+body:not([data-view='connections']) .connections-only,
+body:not([data-view='account']) .account-only,
+body:not([data-auth='in']) .app-chrome {
   display: none !important;
 }
 
@@ -1523,6 +1526,331 @@ body:not([data-depot-mode='shares']) .shares-only {
   font-weight: 700;
 }
 
+/* ---------- Anmeldung ---------- */
+
+.boot-screen {
+  display: grid;
+  place-items: center;
+  min-height: 60vh;
+  color: var(--muted);
+}
+
+.auth-view {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 28px;
+}
+
+.auth-brand {
+  font-size: 20px;
+}
+
+.auth-tabs {
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.auth-form,
+.stack-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-form .btn.primary {
+  padding: 10px;
+}
+
+.field small {
+  font-weight: 400;
+}
+
+.session-warning {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: calc(100vw - 32px);
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--status-warning);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 20%);
+}
+
+/* ---------- Kopfzeile: Konto ---------- */
+
+.account-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  max-width: 220px;
+}
+
+.account-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-link svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.account-link.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.depot-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.depot-picker {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.depot-picker select {
+  width: 100%;
+  text-overflow: ellipsis;
+}
+
+.save-status[data-kind='ok'] {
+  color: var(--up);
+}
+
+.save-status[data-kind='error'] {
+  color: var(--down);
+}
+
+.link-note {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+/* ---------- Seiten: Schnittstellen & Konto ---------- */
+
+.page-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 20px 32px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.section-title {
+  margin: 16px 0 10px;
+}
+
+.security-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--up-bg);
+  color: var(--text);
+}
+
+.security-note svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: var(--up);
+  stroke-width: 2;
+  margin-top: 1px;
+}
+
+.connection-list,
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.connection,
+.provider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border-left: 4px solid var(--border);
+}
+
+.connection.ok { border-left-color: var(--status-good); }
+.connection.error { border-left-color: var(--status-critical); }
+.provider.available { border-left-color: var(--viz-1); }
+.provider.beta { border-left-color: var(--status-warning); }
+.provider.planned { opacity: 0.75; }
+
+.connection-head,
+.provider-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.connection p,
+.provider p {
+  margin: 0;
+}
+
+.connection-status.error {
+  color: var(--down);
+}
+
+.connection-actions,
+.provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.provider-notes {
+  font-style: italic;
+}
+
+.badge.status-ok,
+.badge.provider-available {
+  background: var(--up-bg);
+  color: var(--up);
+}
+
+.badge.status-error {
+  background: var(--down-bg);
+  color: var(--down);
+}
+
+.badge.provider-beta {
+  background: var(--neutral-bg);
+  color: var(--neutral);
+}
+
+.profile {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.profile div {
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.profile dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.profile dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.data-table th {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity li {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--border);
+}
+
+.activity li.warn {
+  border-left-color: var(--status-warning);
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.danger-zone {
+  border-color: var(--down);
+}
+
+.btn.danger {
+  background: var(--down);
+  border-color: var(--down);
+  color: #fff;
+}
+
+#connection-dialog {
+  width: min(480px, calc(100vw - 32px));
+}
+
 /* ---------- Responsive ---------- */
 
 @media (max-width: 900px) {
@@ -1540,7 +1868,8 @@ body:not([data-depot-mode='shares']) .shares-only {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .depot-layout {
+  .depot-layout,
+  .page-layout {
     padding: 12px 16px 24px;
   }
 
